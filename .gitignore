@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Capture / profiling output
+shots/
+baselines/
+profiles/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local tooling state
+.omc/
+.claude/
