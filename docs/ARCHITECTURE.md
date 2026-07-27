@@ -68,7 +68,20 @@ export class MySystem {
 - `uiScene` / `uiCamera` — a separate scene for 3D rendered into the HUD (the
   rotating item preview, the character paperdoll). Drawn after the world with a
   cleared depth buffer.
-- `time` — `{ elapsed, raw, dt, fixed, alpha, scale, frame }`.
+- `time` — `{ elapsed, raw, dt, fixed, alpha, scale, frame, step }`.
+  **`step` is the monotonic simulation step index** and it is the clock every
+  scheduled field in `01-data-model.md` is written against — `attackReady`,
+  `castReady`, `invulnUntil`, `hitstunUntil`, `ccImmuneUntil`, `lastDamageStep`,
+  `nextTickStep`, `nextDecisionStep`, `repathAtStep` and the rest. It is
+  incremented by the engine immediately before the first `fixedUpdate` of a
+  step, is never reset and is never derived from the wall clock. `frame` is the
+  **render** frame and is a different number: a frame may run zero steps or six.
+  Do not invent a private step counter — two of them drift the first time a
+  frame runs two steps.
+- Fixed-step constants, also engine-owned: `PHYSICS_HZ = 60`,
+  `FIXED_DT = 1/60`, `MAX_SUBSTEPS = 6`, and `rawDt` clamped to `0.10 s` before
+  accumulation. Six substeps is exactly `0.10 / (1/60)`, so a frame at the clamp
+  is fully consumed and only a stall beyond it sheds time.
 - `config.q` — the active quality preset. Respect `q.shadowMapSize`,
   `q.particleBudget`, `q.decalBudget`, `q.maxActors`, `q.groundItemBudget`.
   Never exceed a budget.
@@ -108,10 +121,15 @@ fire more than once per frame. The canonical set:
 
 | event | payload | emitted by |
 |---|---|---|
+| `zone:teardown` | `{ zoneId }` | world |
 | `zone:enter` | `{ zoneId, seed, entry }` | world |
 | `zone:ready` | `{ zoneId, bounds, navVersion }` | world |
+| `nav:rebuilt` | `{ zoneId, navVersion, regionCount }` | nav |
 | `actor:spawn` | `{ actor }` | ai / player |
 | `actor:despawn` | `{ actor }` | ai |
+| `actor:footstep` | `{ actor, foot, x, y, z, surface }` | actors |
+| `anim:hitframe` | `{ actor, actionId, actionSeq }` | actors |
+| `anim:telegraph` | `{ actor, actionId, seconds }` | actors |
 | `combat:hit-request` | `{ source, target, packet }` | skills / ai |
 | `actor:damage` | `{ target, source, amount, element, crit, blocked, killed, point }` | combat |
 | `actor:heal` | `{ target, amount, source }` | combat |
@@ -119,6 +137,8 @@ fire more than once per frame. The canonical set:
 | `actor:death` | `{ actor, killer, point }` | combat |
 | `skill:cast` | `{ actor, skillId, level, target, point }` | skills |
 | `skill:impact` | `{ point, element, radius, skillId }` | skills |
+| `skill:trigger` | `{ actor, skillId, level }` | skills |
+| `skill:channel` | `{ actor, skillId, active }` | skills |
 | `projectile:spawn` / `projectile:end` | `{ id, from, to, element }` | skills |
 | `loot:drop` | `{ item, point, rarity }` | items |
 | `loot:pickup` | `{ item, actor }` | items |
@@ -131,6 +151,18 @@ fire more than once per frame. The canonical set:
 | `quest:update` | `{ questId, state, step }` | player |
 | `portal:open` / `portal:use` | `{ from, to, point }` | world |
 | `vendor:open` / `vendor:close` | `{ npcId }` | ui |
+| `ui:pause` | `{ paused }` | ui |
+| `ui:setting` | `{ key, value }` | ui |
+| `ui:respec-request` | `{}` | ui |
+| `ui:difficulty-request` | `{ tier }` | ui |
+| `render:quality` | `{ preset }` | render |
+| `sky:preset` | `{ presetId, zoneId }` | sky |
+| `boss:phase` | `{ phase, actor }` | ai |
+| `ai:pack-alert` | `{ packId, x, z, memberCount }` | ai |
+| `ai:priority-target` | `{ actor, reason }` | ai |
+| `ai:corpse-raised` | `{ actor, shaman, point }` | ai |
+| `save:written` / `save:error` / `save:migrated` | `{ slot, … }` | save |
+| `render:context-lost` / `render:context-restored` | `{}` | render |
 | `resize` | `{ width, height }` | engine |
 
 Rules:
@@ -225,8 +257,15 @@ The balance and map harnesses depend on this:
   per event. Two subsystems must never share a stream.
 - Zone layout seeds are `hash(worldSeed, zoneId, runIndex)` — never wall-clock.
 - Loot rolls draw from the `items` stream in a fixed order: base → quality →
-  affix count → affix pick → affix values.
+  affix count → affix pick → affix values. A real drop draws more than those
+  five times; the full twelve-step order is in `02-api-contracts.md`
+  § Determinism and it is the contract `tools/lootsim.mjs` reproduces.
 - Nothing in `fixedUpdate` may read `performance.now()`, `Date.now()` or `dt`.
+  Schedule against `ctx.time.step`.
+- `EventBus.emit` must not allocate. The obvious implementation copies the
+  handler set on every dispatch (`for (const fn of [...set])`); at `actor:damage`
+  rates in a 25-monster fight that is a per-frame allocation, which rule 6
+  forbids. Use a generation-guarded index walk over a dense array.
 
 ---
 
