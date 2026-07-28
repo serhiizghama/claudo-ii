@@ -1,0 +1,25 @@
+{
+  "name": "claudo-ii",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --expose-gc --test \"tests/**/*.test.js\"",
+    "lint:imports": "node tools/check-imports.mjs",
+    "lint:fixed": "node tools/check-fixed.mjs",
+    "lint": "npm run lint:imports && npm run lint:fixed",
+    "capture": "node tools/capture.mjs",
+    "imagediff": "node tools/imagediff.mjs"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "vite": "^7",
+    "playwright": "^1",
+    "pngjs": "^7"
+  }
+}

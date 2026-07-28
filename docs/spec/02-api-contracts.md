@@ -110,6 +110,7 @@ export class RenderSystem { static id = 'render'; static deps = []; }
 | `screenSize` | property — returns ``{ width:int, height:int }` — internal RT size`| N | no |
 | `depthTexture` | property — returns ``THREE.DepthTexture` — linear depth for soft particles`| N | no |
 | `frameIndex` | property — returns ``int` — frames composited since boot`| Y | no |
+| `render` | `(ctx) => void` — composites the frame: opaque world into the HDR target, HDR → canvas through the AgX composite, uiScene last with a cleared depth buffer. Called by the engine after every `lateUpdate` | N | no |
 | `registerPass` | `(pass:PostPass, order:int) => int` — returns `handle`| — | yes |
 | `unregisterPass` | `(handle:int) => void`| — | no |
 | `addLight` | `(light:THREE.Light, opts?:{ cullRadius:number, ballast:boolean }) => LightHandle` — returns `handle`| N | yes |
@@ -121,7 +122,9 @@ export class RenderSystem { static id = 'render'; static deps = []; }
 | `setColourGrade` | `(gradeId:string, blend:number) => void` — per-zone LUT | N | no |
 | `worldToScreen` | `(x,y,z:number, out?:{x,y,visible}) => {x:number,y:number,visible:boolean}` — returns `out`| N | no |
 | `stats` | property → `{ drawCalls, triangles, programs, gpuMs, cpuMs }` | N | no |
+| `withPrewarmTarget` | `(fn:() => Promise<void>) => Promise<void>` — binds a scratch render target for the duration of `fn` (building it on first call), then restores whatever was bound before. The one caller is `core/prewarm.js`, which runs its whole hook pass — every subsystem's `prewarmMaterials(ctx)`, `render`'s own included — inside `fn` | — | yes (first call) |
 | `prewarmMaterials` | `(ctx) => Promise<void>` — returns `promise`| — | yes |
+| `cameraRig` | property → `{ solveOrbitLock(focusX,focusY,focusZ,pitchDeg,yawDeg,distance,outPosition,outLookAt) => outPosition, withCameraWrite(camera,fn) => void }` — the pure orbit-lock solver and the dev-only camera write gate (`src/render/camera.js`). The runtime path `player` (§13) reaches RNDR-2's camera rig through, since it cannot import that module directly (rule 2) | Y | no |
 
 | Direction | Events |
 |---|---|
