@@ -80,6 +80,24 @@
 // `all.push(x)` — see `src/render/camera.js`'s `guardVector`, which this
 // mirrors, for the one-trap-covers-every-method reasoning in full).
 //
+// `has`/`getOwnPropertyDescriptor` (O-33) — `get` alone is not enough. Every
+// index-based `Array.prototype` algorithm that is spec'd around
+// `HasProperty`/`[[GetOwnProperty]]` rather than a raw `[[Get]]` —
+// `slice`, `map`, `filter`, `forEach`, `indexOf`, `includes`'s cousins, ...
+// — checks `prop in this` (or the internal equivalent) BEFORE reading the
+// value, and without a `has` trap that check falls through to the
+// (permanently empty) target and comes back `false` for every index, so
+// those methods see nothing but holes even though `get`/`for...of`/spread/
+// `Array.from` (which don't consult `HasProperty` first) all worked. `has`
+// and `getOwnPropertyDescriptor` are kept agreeing with `get` by sharing
+// one predicate, `isLiveIndex`, so the view can never again answer
+// differently depending on which trap a given `Array.prototype` algorithm
+// happens to use. `getOwnPropertyDescriptor` must report `configurable:
+// true`: the target is a real, permanently empty array, so claiming a
+// non-configurable own property that the target itself does not have
+// violates the `Proxy` invariant and throws — see `isLiveIndex`'s call site
+// below for the full reasoning.
+//
 // This is NOT the write-guard-only, disabled-in-production pattern RNDR-2's
 // camera uses (an earlier version of this file tried exactly that, keeping
 // a real backing array kept at `.length === liveCount` by truncating it on
@@ -221,17 +239,53 @@ const REF_SCRATCH_HELD_MESSAGE =
  * pool's own `_liveCount`/`_dense`/`_records`.
  * @param {ActorPool} pool
  */
+// Shared by `get`/`has`/`getOwnPropertyDescriptor` — the one place that
+// decides whether `prop` names a live in-range index, so the three traps
+// can never disagree with each other about where the holes are (that
+// disagreement, `get` answering but `has` refusing, was exactly O-33's bug:
+// every `Array.prototype` algorithm that checks `HasProperty` before
+// reading — `slice`, `map`, `filter`, `forEach`, `indexOf`, ... — treated
+// the whole view as holes even though `get`/`for...of`/spread/`Array.from`
+// all worked, because those don't consult `[[HasProperty]]` first).
+function isLiveIndex(pool, prop) {
+  if (typeof prop !== 'string') return false;
+  const idx = Number(prop);
+  return Number.isInteger(idx) && idx >= 0 && idx < pool._liveCount;
+}
+
 function makeAllViewHandler(pool) {
   return {
     get(target, prop, receiver) {
       if (prop === 'length') return pool._liveCount;
-      if (typeof prop === 'string') {
-        const idx = Number(prop);
-        if (Number.isInteger(idx) && idx >= 0 && idx < pool._liveCount) {
-          return pool._records[pool._dense[idx]];
-        }
+      if (isLiveIndex(pool, prop)) {
+        return pool._records[pool._dense[Number(prop)]];
       }
       return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (isLiveIndex(pool, prop)) return true;
+      return Reflect.has(target, prop);
+    },
+    // Array.prototype algorithms that check HasProperty (slice/map/filter/
+    // forEach/indexOf/...) call this, not `get`, once `has` says true — see
+    // MDN's own [[Get]] spec note. Must agree with `get`/`has` on which
+    // indices exist, and MUST report `configurable: true`: the target is a
+    // permanently empty array, so a non-configurable descriptor for an
+    // "own" property the target doesn't actually have violates the Proxy's
+    // own invariant and throws a TypeError (the exact case `enumerable`/
+    // `configurable` both need to be `true` for here — a data property with
+    // no getter/setter). `writable: false` still keeps `set` the only path
+    // that can ever be reached for a write, and `set` already throws.
+    getOwnPropertyDescriptor(target, prop) {
+      if (isLiveIndex(pool, prop)) {
+        return {
+          value: pool._records[pool._dense[Number(prop)]],
+          writable: false,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(target, prop);
     },
     set() {
       throw new TypeError(ALL_READONLY_MESSAGE);

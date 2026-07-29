@@ -24,14 +24,16 @@
  * which drives physics.moveBody() and keeps the body and the record in step.
  *
  * PUBLIC API — const actors = ctx.get('actors')
- * This ticket (ACTR-1) implements the Lifecycle slice of the table below,
- * plus `moveTo` alone (pulled forward from ACTR-2/M1 — see `motion.js`'s
- * header for why M0 cannot close without it) — see 02-api-contracts.md §7
- * for the full API this class will grow into across ACTR-2..17. Every other
- * "Transform and motion" row (`teleport`, `face`, `moveSpeed`,
- * `applyImpulse`, `distance`, `inRange`) and everything past it (`stats()`,
- * `setState`, `applyStatus`, ...) belongs to a later ticket and is
- * deliberately absent, not stubbed (see this ticket's report).
+ * ACTR-1 implemented the Lifecycle slice of the table below, plus `moveTo`
+ * alone (pulled forward from ACTR-2/M1 — see `motion.js`'s header for why
+ * M0 could not close without it). ACTR-2 (this ticket) adds the rest of
+ * "Transform and motion" it judged in scope — `teleport`, `face`,
+ * `moveSpeed`, `distance`, `inRange` — plus the dev-build write guard on
+ * `actor.x`/`actor.z` (see `motion.js`'s header for the guard design and for
+ * why `applyImpulse` is the one row deliberately left out). Everything past
+ * "Transform and motion" (`stats()`, `setState`, `applyStatus`, ...) still
+ * belongs to a later ticket and is deliberately absent, not stubbed (see
+ * this ticket's report).
  */
 // (docs/spec/02-api-contracts.md §7, verbatim above — see that document for
 // the full method table this ticket implements the Lifecycle slice of.)
@@ -99,7 +101,18 @@
 // rule ("If you need an event that is not listed, add a row here").
 
 import { ActorPool } from './pool.js';
-import { moveActor, createMoveResultScratch } from './motion.js';
+import {
+  moveActor,
+  createMoveResultScratch,
+  teleportActor,
+  faceActor,
+  actorDistance,
+  actorsInRange,
+  computeMoveSpeed,
+  installActorWriteGuard,
+  beginActorWrite,
+  endActorWrite,
+} from './motion.js';
 
 /** `01-data-model.md` §11.1's `Actor` row, low/medium/high/ultra — the
  * RECORD pool capacity, not `q.maxActors` (the smaller *simulation* cap;
@@ -171,9 +184,23 @@ export class ActorsSystem {
      * ("The returned MoveResult — a shared scratch"). Built once here,
      * never reassigned. */
     this._moveResult = createMoveResultScratch();
+    /** `teleport`'s reused `nav.snap` `out` scratch (a `Vec3`,
+     * `02-api-contracts.md`'s own shape) — same "built once, never
+     * reassigned" discipline as `_moveResult`, so `teleport` stays
+     * `Alloc: no` regardless of whether `nav` is present. */
+    this._navSnapScratch = { x: 0, y: 0, z: 0 };
+    /** Kept only for `teleport`'s `ctx.peek('nav')` lookup at call time —
+     * ACTR-1 never needed to hold `ctx` past `init()`; `nav` is ticket #7/#11
+     * of this milestone (this is #4) and may not be registered at all yet,
+     * so the lookup has to happen per call, the same `ctx.has`/`ctx.get`
+     * guarded-by-typeof pattern `src/core/engine.js` already uses for
+     * `world.serviceZoneRequest()` (see `motion.js`'s "teleport" section for
+     * the full reasoning). */
+    this._ctx = null;
   }
 
   async init(ctx) {
+    this._ctx = ctx;
     this._physics = ctx.peek('physics') ?? null;
 
     const quality = ctx && ctx.config && ctx.config.quality;
@@ -183,13 +210,11 @@ export class ActorsSystem {
     this._bodyId = new Int32Array(capacity);
   }
 
-  // ─── Transform and motion (02-api-contracts.md §7) — ACTR-2 slice ──────
-  // `moveTo` only, pulled forward from M1's ACTR-2 at the project owner's
-  // direction because PLYR-1 (M0) has no other legal way to move an actor
-  // (`ARCHITECTURE.md` / `02` §4: never write actor.x/z directly). Every
-  // other row of this section (`teleport`, `face`, `moveSpeed`,
-  // `applyImpulse`, `distance`, `inRange`) is still ACTR-2's, not
-  // implemented here — see `motion.js`'s own header for the full boundary.
+  // ─── Transform and motion (02-api-contracts.md §7) ─────────────────────
+  // `moveTo` was pulled forward into M0 by ACTR-1 — see `motion.js`'s own
+  // header for why. This ticket (ACTR-2) adds `teleport`/`face`/`moveSpeed`/
+  // `distance`/`inRange` below; `applyImpulse` is the one row deliberately
+  // left out — see `motion.js`'s own "applyImpulse" section for why.
 
   /** `02-api-contracts.md` §7: `moveTo(actor, dx, dz) => MoveResult` — a
    * per-step delta, not a destination. See `motion.js` for the algorithm,
@@ -199,6 +224,45 @@ export class ActorsSystem {
   moveTo(actor, dx, dz) {
     const bodyId = actor && this._bodyId ? this._bodyId[actor.poolIndex] : 0;
     return moveActor(actor, dx, dz, this._physics, bodyId, this._moveResult);
+  }
+
+  /** `02-api-contracts.md` §7: `teleport(actor, x, z) => boolean` — snaps to
+   * nav, returns false if none. See `motion.js`'s "teleport" section for the
+   * algorithm, `TELEPORT_SNAP_RADIUS`'s derivation, and the documented
+   * degraded behaviour while `nav` (NAV-1/NAV-5, tickets #7/#11) does not
+   * exist yet: `nav` is reached only at call time, via `ctx.peek('nav')`,
+   * guarded by `typeof nav.snap === 'function'` — never imported. */
+  teleport(actor, x, z) {
+    const bodyId = actor && this._bodyId ? this._bodyId[actor.poolIndex] : 0;
+    const nav = this._ctx && typeof this._ctx.peek === 'function' ? this._ctx.peek('nav') : undefined;
+    return teleportActor(actor, x, z, this._physics, bodyId, nav, this._navSnapScratch);
+  }
+
+  /** `02-api-contracts.md` §7: `face(actor, targetX, targetZ, maxTurnRate)
+   * => void`. See `motion.js`'s "face" section for why `maxTurnRate` is
+   * radians/second despite this method reading no clock. */
+  face(actor, targetX, targetZ, maxTurnRate) {
+    faceActor(actor, targetX, targetZ, maxTurnRate);
+  }
+
+  /** `02-api-contracts.md` §7: `distance(a, b) => number` — surface-to-
+   * surface, radii subtracted. Pure; see `motion.js`. */
+  distance(a, b) {
+    return actorDistance(a, b);
+  }
+
+  /** `02-api-contracts.md` §7: `inRange(a, b, range) => boolean`. Pure; see
+   * `motion.js`. */
+  inRange(a, b, range) {
+    return actorsInRange(a, b, range);
+  }
+
+  /** `02-api-contracts.md` §7: `moveSpeed(actor) => number` — m/s after
+   * stats and statuses. See `motion.js`'s "moveSpeed" section for the
+   * formula and why both its real inputs are placeholders until ACTR-7/8
+   * (stats) and a real class/bestiary table exist. */
+  moveSpeed(actor) {
+    return computeMoveSpeed(actor);
   }
 
   // ─── Lifecycle (02-api-contracts.md §7) ────────────────────────────────
@@ -215,8 +279,23 @@ export class ActorsSystem {
    */
   spawn(spec) {
     const merged = { ...SPAWN_SPEC_DEFAULTS, ...spec };
-    const actor = this._pool.acquire(merged);
+    // `ActorPool#acquire` writes the initial spawn placement straight into
+    // `actor.x`/`actor.z` (not through `moveTo`/`teleport`) — this subsystem's
+    // OWN internal lifecycle bookkeeping, not an "other subsystem" write, so
+    // it runs inside the write guard's unlocked window. See motion.js's
+    // "write guard" section.
+    beginActorWrite();
+    let actor;
+    try {
+      actor = this._pool.acquire(merged);
+    } finally {
+      endActorWrite();
+    }
     if (!actor) return null;
+    // Idempotent — a no-op on every spawn after this slot's very first one
+    // (the guard, once installed on a pool slot's record, stays installed
+    // for the life of the process; see motion.js's own header).
+    installActorWriteGuard(actor);
 
     if (this._physics) {
       const groundY = this._physics.groundHeight(actor.x, actor.z);
@@ -259,7 +338,15 @@ export class ActorsSystem {
     const bodyId = this._bodyId ? this._bodyId[poolIndex] : 0;
     if (this._physics && bodyId !== 0) this._physics.removeBody(bodyId);
     if (this._bodyId) this._bodyId[poolIndex] = 0;
-    this._pool.release(actor);
+    // `ActorPool#release` -> `resetActorRecord` zeroes `actor.x`/`actor.z`
+    // directly — this subsystem's own pool-reset bookkeeping, same reasoning
+    // as spawn()'s acquire() call above.
+    beginActorWrite();
+    try {
+      this._pool.release(actor);
+    } finally {
+      endActorWrite();
+    }
   }
 
   /** `resolve(ref) => Actor | null`. Throws in dev if handed the pooled
@@ -307,5 +394,7 @@ export class ActorsSystem {
     this._physics = null;
     this._bodyId = null;
     this._moveResult = null;
+    this._navSnapScratch = null;
+    this._ctx = null;
   }
 }

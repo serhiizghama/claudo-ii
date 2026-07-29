@@ -11,6 +11,25 @@
 // boundary list.
 //
 // ---------------------------------------------------------------------------
+// PLYR-2 addendum — `moveOrder`/`stop`/`_followOrder` now wire into `./move.js`
+// ---------------------------------------------------------------------------
+// `nav` exists now (NAV-1..5, all accepted). The straight-line-only
+// `_followOrder` PLYR-1 shipped is replaced below by a thin delegation into
+// `PathFollower` (`./move.js`, this ticket's real file — see its own header
+// for the full §3.4 twelve-step algorithm, the blocked-streak anti-wedge
+// mechanism, the missing-`raycastNav` guard and the `PathHandle` lifetime
+// argument). This file's job is unchanged in shape: `moveOrder` still just
+// starts an order, `_followOrder` still runs every fixed step regardless of
+// the latch, `stop`/`_cancelOrder` still cancels one — only what happens
+// *inside* those three now goes through `move.js` instead of a bare
+// straight-line lerp. `computeArriveRadius` moved to `./move.js` too (its
+// natural home now that arrival is `move.js`'s own concern) and is
+// re-exported below unchanged, so `tests/player/plyr1.test.js`'s existing
+// `import { computeArriveRadius } from '../../src/player/index.js'` keeps
+// working byte-for-bit. Nothing about the intent latch, the ladder dispatch,
+// `groundCursor`, or the camera follow below changed at all.
+//
+// ---------------------------------------------------------------------------
 // The latch, precisely (11-flows.md §3.1)
 // ---------------------------------------------------------------------------
 // `update(dt, ctx)` is the ONLY place this file reads `ctx.input` or
@@ -133,6 +152,11 @@
 // `tests/player/plyr1.test.js`) never triggers it even when `init()` runs
 // against a Node ctx.
 
+// PLYR-2: the real path-following state machine. Same directory, not a
+// cross-subsystem import (hard rule 2 only forbids reaching into another
+// subsystem's own module) — see move.js's own header.
+import { PathFollower, computeArriveRadius } from './move.js';
+
 const DEG2RAD = Math.PI / 180;
 
 /** `PointerEvent.button` for the primary/left button — `11-flows.md` §3
@@ -166,21 +190,6 @@ const GROUND_Y = 0;
  * pitch; guarded anyway so a future camera-peek perturbation can never
  * divide by (near-)zero. */
 const RAY_VERTICAL_EPSILON = 1e-8;
-
-/** m/s. ASSIGNED: `actors.moveSpeed()` (`class.runSpeed *
- * (1 + movementSpeed/100)`, `11-flows.md` §3.4 step 9) does not exist yet
- * (ACTR-2, M1) — no stat composition, no class table. Substitutes the
- * Ravager class's own base `runSpeed` verbatim (`01-data-model.md` line
- * ~414, `runSpeed: 4.2`) as a fixed stand-in until `actors.moveSpeed` lands;
- * this is the exact number `docs/PROGRESS.md`'s O-25 entry also cites for
- * the "harmless at walk speed" per-step delta (`4.2 / 60 ≈ 0.07 m`). */
-const MOVE_SPEED_MPS = 4.2;
-
-/** Metres. `11-flows.md` §3.4 step 12, verbatim formula:
- * `arriveRadius = max(0.25, actor.radius * 0.6)` — not assigned by this
- * ticket, copied from the spec. */
-const ARRIVE_RADIUS_MIN_M = 0.25;
-const ARRIVE_RADIUS_FACTOR = 0.6;
 
 /** Metres. ASSIGNED — `11-flows.md` §2.2 names "camera follow with the dead
  * zone" but gives no number anywhere in the five spec documents this ticket
@@ -233,18 +242,12 @@ export function isShiftHeld(input) {
   return input.keyHeld(SHIFT_LEFT_CODE) || input.keyHeld(SHIFT_RIGHT_CODE);
 }
 
-/**
- * `11-flows.md` §3.4 step 12's arrival-radius formula, verbatim: never
- * smaller than 0.25 m, else 60% of the actor's own collision radius — a
- * slender actor gets a tight arrival tolerance, a wide one a looser one that
- * still sits comfortably inside its own footprint.
- * @param {{radius:number}} actor
- * @returns {number}
- */
-export function computeArriveRadius(actor) {
-  const scaled = actor.radius * ARRIVE_RADIUS_FACTOR;
-  return scaled > ARRIVE_RADIUS_MIN_M ? scaled : ARRIVE_RADIUS_MIN_M;
-}
+// `computeArriveRadius` now lives in `./move.js` (PLYR-2 addendum, see this
+// file's header, imported above) — re-exported here unchanged so
+// `tests/player/plyr1.test.js`'s existing
+// `import { computeArriveRadius } from '../../src/player/index.js'` keeps
+// resolving.
+export { computeArriveRadius };
 
 /**
  * Unprojects one NDC point through `camera` into a world-space ray, without
@@ -319,12 +322,16 @@ export class PlayerSystem {
   // never a static import — rule 2) and does not need to be: `src/main.js`
   // registers `render` before `player` (B4's registration order), and
   // `Registry.resolve()`'s DFS ties are broken by registration order, so
-  // `render` is guaranteed initialized first regardless.
-  static deps = ['actors'];
+  // `render` is guaranteed initialized first regardless. `nav` (PLYR-2
+  // addendum) IS real and registered now (NAV-1..5, all accepted) — added
+  // here as a genuine hard dependency, not a runtime-only `ctx.get`, so
+  // `init()` below can cache it exactly like `this._actors`.
+  static deps = ['actors', 'nav'];
 
   constructor() {
     this._ctx = null;
     this._actors = null;
+    this._nav = null;
     this._rig = null;
     this._actor = null;
 
@@ -335,13 +342,13 @@ export class PlayerSystem {
      * acted on — see the file header, "The latch, precisely". */
     this._consumedSequence = 0;
 
-    /** The current move order, in world space — set only by `moveOrder()`,
-     * cleared on arrival or `stop()`. Followed every fixed step regardless
-     * of whether that step is the one that latched it (see the file
-     * header). */
-    this._orderActive = false;
-    this._orderX = 0;
-    this._orderZ = 0;
+    /** The current move order — PLYR-2 addendum: `moveOrder()`/`stop()`/
+     * `_followOrder()` below are thin wiring into this; see `./move.js`'s own
+     * header for the real §3.4 state machine (destination validation,
+     * requestPath/pollPath/smooth, blocked-streak repathing, arrival). One
+     * instance for the lifetime of this `PlayerSystem`, reused across every
+     * order — no per-order allocation. */
+    this._pathFollower = new PathFollower();
 
     /** `groundCursor()`'s live value, recomputed once per `update()` frame
      * (§3.3) — never touched from `fixedUpdate`. */
@@ -377,6 +384,7 @@ export class PlayerSystem {
   async init(ctx) {
     this._ctx = ctx;
     this._actors = ctx.get('actors');
+    this._nav = ctx.get('nav');
     this._rig = ctx.get('render').cameraRig;
 
     // See the file header, "No player actor exists yet either".
@@ -440,11 +448,19 @@ export class PlayerSystem {
    * intent (see the file header); nothing stops another subsystem calling
    * it directly later (a future "walk here" UI affordance), which is
    * exactly why it is its own public method and not inlined into the
-   * dispatch. */
+   * dispatch.
+   *
+   * PLYR-2 addendum: validation (§3.4 steps 1-2) can now DROP the order —
+   * `PathFollower.beginOrder` returns `false` on an unreachable destination
+   * (`nav.snap`/`nav.connected` failure). When that happens this clears
+   * `intent.hasMoveOrder` right back to `false` in the same call, so a
+   * dropped order never leaves the intent looking like a live one — see
+   * `./move.js`'s header for why `nav.version === 0` (no real zone yet, e.g.
+   * `tests/player/plyr1.test.js`'s own boot()) always succeeds unconditionally
+   * instead, preserving that suite's original behaviour exactly. */
   moveOrder(x, z) {
-    this._orderActive = true;
-    this._orderX = x;
-    this._orderZ = z;
+    const accepted = this._pathFollower.beginOrder(this._nav, this._actor, x, z);
+    if (!accepted) this._intent.hasMoveOrder = false;
   }
 
   /** `stop() => void` — §3.2 ladder priority 3. Releases the current order
@@ -468,7 +484,9 @@ export class PlayerSystem {
 
   /** @private */
   _cancelOrder() {
-    this._orderActive = false;
+    // PLYR-2 addendum: releases/cancels any PathHandle/requestId the order
+    // was holding — see move.js's header, "PathHandle lifetime".
+    this._pathFollower.cancel(this._nav);
     this._intent.hasMoveOrder = false;
     this._intent.stopRequested = false;
     if (this._actor && typeof this._actors.setState === 'function') {
@@ -540,8 +558,13 @@ export class PlayerSystem {
       this._debugView.dispose();
       this._debugView = null;
     }
+    // PLYR-2 addendum: release/cancel any outstanding PathHandle/requestId
+    // before this instance goes away — see move.js's header, "PathHandle
+    // lifetime".
+    this._pathFollower.cancel(this._nav);
     this._ctx = null;
     this._actors = null;
+    this._nav = null;
     this._rig = null;
     this._actor = null;
   }
@@ -669,36 +692,21 @@ export class PlayerSystem {
   /**
    * Steers toward the current order every fixed step (see the file header
    * — this is deliberately NOT gated by the sequence latch: six ticks of
-   * walking need six `actors.moveTo()` calls). Straight-line only, per this
-   * ticket's boundary (no `nav`). Clamps the step so it never overshoots
-   * the target (no orbiting/oscillation around the arrival point), and
-   * clears the order via `intent.hasMoveOrder = false` on arrival.
+   * walking need six `actors.moveTo()` calls).
+   *
+   * PLYR-2 addendum: the straight-line-only walk is now `PathFollower`'s
+   * `MODE_DIRECT`/`nav.version===0` fallback, one branch among the full
+   * §3.4 state machine — see `./move.js`'s header. This method is reduced
+   * to exactly the delegation + the one bit of bookkeeping `move.js` cannot
+   * do itself (it never touches `Intent`): clearing `intent.hasMoveOrder`
+   * the instant the order stops being active, whether that is because it
+   * arrived (step 12) or was dropped (a mid-walk repath finding the
+   * destination no longer reachable).
    * @private
    */
   _followOrder(h) {
-    if (!this._orderActive) return;
-    const actor = this._actor;
-
-    const dx = this._orderX - actor.x;
-    const dz = this._orderZ - actor.z;
-    const dist = Math.sqrt(dx * dx + dz * dz); // rule 5: never Math.hypot
-
-    const arriveRadius = computeArriveRadius(actor);
-    if (dist <= arriveRadius) {
-      this._orderActive = false;
-      this._intent.hasMoveOrder = false;
-      if (typeof this._actors.setState === 'function') this._actors.setState(actor, 'idle');
-      return;
-    }
-
-    const stepDist = MOVE_SPEED_MPS * h;
-    const moveDist = stepDist < dist ? stepDist : dist; // never step past the target
-    const invDist = 1 / dist; // dist > arriveRadius > 0 here — safe
-    const moveX = dx * invDist * moveDist;
-    const moveZ = dz * invDist * moveDist;
-
-    // The one legal way to move an actor — 02-api-contracts.md §4 / the
-    // file header. Never `actor.x += ...`.
-    this._actors.moveTo(actor, moveX, moveZ);
+    if (!this._pathFollower.active) return;
+    this._pathFollower.step(h, this._nav, this._actors, this._actor);
+    if (!this._pathFollower.active) this._intent.hasMoveOrder = false;
   }
 }

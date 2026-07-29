@@ -20,6 +20,20 @@
 // array references would silently go stale the next time a static grid
 // grows mid-session.
 //
+// PHYS-4 addendum: `separate` is added below. Same "index.js: wiring only"
+// precedent as PHYS-2/PHYS-3 — a thin forward into `SeparationSystem`
+// (`./separate.js`, PHYS-4's real file), which reads/writes this instance's
+// own `_bodies` fields fresh on every call (the same seam `CastSystem`
+// already uses — see `separate.js`'s own header for why, and for the O-30
+// broadphase decision).
+//
+// PHYS-5 addendum: `sweepProjectile` is added below. Same "index.js: wiring
+// only" precedent again — a thin forward into `SweepSystem` (`./sweep.js`,
+// PHYS-5's real file). See `sweep.js`'s own header for the algorithm and,
+// importantly, for the resolved reading of `(dx,dz)` as a per-step
+// DISPLACEMENT vector (its magnitude is the sweep distance), not a direction
+// to be re-normalized the way `circleCast`'s `(dx,dz)` is.
+//
 /**
  * ===========================================================================
  * PHYSICS — 2.5D broadphase, casts, actor push-out, projectile sweeps
@@ -71,6 +85,9 @@
 
 import { UniformGrid, CELL_SIZE } from './grid.js';
 import { BodyStore, BODY_FLAG, DEFAULT_MAX_BODIES } from './body.js';
+import { CastSystem } from './cast.js';
+import { SeparationSystem } from './separate.js';
+import { SweepSystem } from './sweep.js';
 
 /** Re-exported for convenience only — NOT part of the `ctx.get('physics')`
  * instance contract (see `body.js`'s own comment on this constant: unlike
@@ -251,8 +268,8 @@ export class PhysicsSystem {
     // `stats` (Alloc: no) returns this exact object every call, mutated in
     // place — the same convention `src/render/index.js`'s `get stats()`
     // already uses for its own Alloc:no property. `bodies` is real from
-    // here on (PHYS-2); `casts`/`separationMs` remain honest zeros for
-    // PHYS-3/4.
+    // here on (PHYS-2); `casts` is real as of PHYS-3; `separationMs` is real
+    // as of PHYS-4 (`SeparationSystem.separate()` writes it every call).
     this._stats = { statics: 0, bodies: 0, cells: 0, casts: 0, separationMs: 0 };
 
     /** `ctx.get('physics').LAYER` / `.MASK` — the module-level frozen
@@ -260,6 +277,29 @@ export class PhysicsSystem {
      * lists them in the same table as the instance methods). */
     this.LAYER = LAYER;
     this.MASK = MASK;
+
+    // --- Casts (PHYS-3) -----------------------------------------------------
+    // `CastSystem` (./cast.js, PHYS-3's real file) reads this instance's own
+    // fields (and `this._bodies`'s) fresh on every call rather than through a
+    // captured/duck-typed source — see cast.js's file header for why that is
+    // the least invasive shape given this ticket's "index.js: wiring only"
+    // boundary. Built last so every field it might read already exists.
+    this._casts = new CastSystem(this);
+
+    // --- Separation (PHYS-4) -----------------------------------------------
+    // `SeparationSystem` (./separate.js, PHYS-4's real file) follows the same
+    // "read the whole PhysicsSystem instance fresh" seam `CastSystem` above
+    // established — see separate.js's own header for why, and for the O-30
+    // broadphase decision this ticket measured rather than guessed.
+    this._separation = new SeparationSystem(this);
+
+    // --- Projectile sweep (PHYS-5) ------------------------------------------
+    // `SweepSystem` (./sweep.js, PHYS-5's real file) follows the same "read
+    // the whole PhysicsSystem instance fresh" seam as `CastSystem`/
+    // `SeparationSystem` above, and draws its `Hit` records from `_casts`'s
+    // own 32-deep ring rather than building a second one — see sweep.js's
+    // own header for why, and for the (dx,dz)-is-a-displacement reading.
+    this._projectileSweep = new SweepSystem(this);
   }
 
   /**
@@ -629,10 +669,93 @@ export class PhysicsSystem {
     this._bodies.setBodyFlags(bodyId, flags);
   }
 
-  /** `{ statics, bodies, cells, casts, separationMs }` — `bodies`, `casts`,
-   * `separationMs` are honest zeros here (PHYS-2/3/4 own them); `statics`
-   * and `cells` are real and live-updated by `addStatic`/`removeStatic`/
-   * `rebuild`. Returns the same object every call (Alloc: no) — mutate in
+  // ---------------------------------------------------------------------
+  // Casts (PHYS-3) — thin forwards into CastSystem; see this file's header
+  // and cast.js's own header for the algorithms and documented decisions.
+  // ---------------------------------------------------------------------
+
+  /** `02-api-contracts.md` §4: `circleCast(x,z,dx,dz,radius,maxDist,mask,
+   * out?) => Hit`. */
+  circleCast(x, z, dx, dz, radius, maxDist, mask, out) {
+    return this._casts.circleCast(x, z, dx, dz, radius, maxDist, mask, out);
+  }
+
+  /** `02-api-contracts.md` §4: `rayCast(x,z,dx,dz,maxDist,mask,out?) =>
+   * Hit`. */
+  rayCast(x, z, dx, dz, maxDist, mask, out) {
+    return this._casts.rayCast(x, z, dx, dz, maxDist, mask, out);
+  }
+
+  /** `02-api-contracts.md` §4: `lineOfSight(ax,az,bx,bz,mask) => boolean`. */
+  lineOfSight(ax, az, bx, bz, mask) {
+    return this._casts.lineOfSight(ax, az, bx, bz, mask);
+  }
+
+  /** `02-api-contracts.md` §4: `overlapCircle(x,z,radius,mask,out) => int
+   * count` — fills `out` with actor ids. */
+  overlapCircle(x, z, radius, mask, out) {
+    return this._casts.overlapCircle(x, z, radius, mask, out);
+  }
+
+  /** `02-api-contracts.md` §4: `overlapCone(x,z,facing,halfAngle,radius,
+   * mask,out) => int`. */
+  overlapCone(x, z, facing, halfAngle, radius, mask, out) {
+    return this._casts.overlapCone(x, z, facing, halfAngle, radius, mask, out);
+  }
+
+  /** `02-api-contracts.md` §4: `overlapRect(x,z,halfW,halfL,facing,mask,
+   * out) => int`. */
+  overlapRect(x, z, halfW, halfL, facing, mask, out) {
+    return this._casts.overlapRect(x, z, halfW, halfL, facing, mask, out);
+  }
+
+  /** `02-api-contracts.md` §4: `nearest(x,z,radius,mask,excludeId) => int
+   * actorId | 0`. */
+  nearest(x, z, radius, mask, excludeId) {
+    return this._casts.nearest(x, z, radius, mask, excludeId);
+  }
+
+  // ---------------------------------------------------------------------
+  // Separation (PHYS-4) — thin forward into SeparationSystem; see
+  // separate.js's own header for the algorithm, the O-30 broadphase
+  // decision and the ambiguities this ticket resolved (D1-D5).
+  // ---------------------------------------------------------------------
+
+  /** `02-api-contracts.md` §4: `separate(iterations:int) => void` — one
+   * crowd push-out pass over all bodies. **Never call this from anywhere
+   * but `actors`'s fixed step** — "actors calls it exactly once per fixed
+   * step, in a fixed position in the step order" (02-api-contracts.md §4,
+   * "Forbidden for callers"). Updates `stats.separationMs`.
+   * @param {number} iterations */
+  separate(iterations) {
+    this._separation.separate(iterations);
+  }
+
+  // ---------------------------------------------------------------------
+  // Projectile sweep (PHYS-5) — thin forward into SweepSystem; see
+  // sweep.js's own header for the algorithm and the resolved (dx,dz)
+  // reading (a per-step displacement, not a direction).
+  // ---------------------------------------------------------------------
+
+  /** `02-api-contracts.md` §4: `sweepProjectile(x,z,dx,dz,radius,mask,
+   * excludeId,out?) => Hit` — the swept collision test a projectile runs
+   * every fixed step (`11-flows.md` §5.5 step 4), from the previous to the
+   * new position. `(dx,dz)` is that step's full displacement vector; its
+   * magnitude is the sweep distance (see `sweep.js`'s header for why this
+   * differs from `circleCast`'s direction-plus-`maxDist` shape). */
+  sweepProjectile(x, z, dx, dz, radius, mask, excludeId, out) {
+    return this._projectileSweep.sweepProjectile(x, z, dx, dz, radius, mask, excludeId, out);
+  }
+
+  /** `{ statics, bodies, cells, casts, separationMs }` — all five fields are
+   * real as of PHYS-4: `statics`/`cells`/`bodies` (PHYS-1/2), `casts`
+   * (PHYS-3, incremented once per call to any of the seven cast methods
+   * above, AND — as of this ticket, PHYS-5 — once per `sweepProjectile`
+   * call too, since it is the same kind of geometric query and the contract
+   * has no separate counter for it) and `separationMs` (PHYS-4, the
+   * wall-clock duration of the most recent `separate()` call — a
+   * measurement only, never fed back into simulation; see `separate.js`'s
+   * header). Returns the same object every call (Alloc: no) — mutate in
    * place, never reallocate, matching `render.stats`'s own convention. */
   get stats() {
     return this._stats;

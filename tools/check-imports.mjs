@@ -49,10 +49,31 @@
 // PHYS-3..5 / ACTR-2..17 from breaking it later, silently, until `mapgen`
 // (M5) stops booting. Added here on request (O-22), on the `src/core/`
 // pattern — `three`-only, not the full `document`/`window`/
-// `performance.now()` sweep. Unlike `src/core/`, there is today no known
-// legitimate guarded browser-global read in either directory to protect —
-// see this ticket's report for the recommendation to reconsider going
-// stricter (`checkGlobals: true`) once that's confirmed to stay true.
+// `performance.now()` sweep, with a note to reconsider going stricter once
+// confirmed clean.
+//
+// O-29 acted on that note, and it did NOT go the same way for both:
+//
+//   - `src/actors/` verified genuinely clean of every forbidden global —
+//     upgraded below to `checkGlobals: true`, the same full N-surface sweep
+//     `src/combat/`/`src/items/`/`src/skills/`/`src/nav/`/`src/world/` get.
+//   - `src/physics/` did NOT verify clean: `src/physics/separate.js` reads
+//     `performance.now()` twice (wrapping its own resolution loop, to write
+//     `stats.separationMs` — see that file's own header for why its author
+//     believed this was sanctioned under the THEN-current three-only rule).
+//     Flipping `checkGlobals` to `true` for `src/physics/` would fail the
+//     lint against that real, already-shipped, already-tested file — which
+//     this ticket does not own and will not silently edit to make a
+//     stricter lint pass. `src/physics/` is therefore LEFT at `checkThree:
+//     true, checkGlobals: false`, unchanged, and the finding is reported
+//     instead (see this ticket's report): `src/physics/separate.js:177` and
+//     `:256`, both `performance.now()` reads outside any `fixedUpdate` body
+//     (so `check-fixed.mjs` cannot see them either) and outside this lint's
+//     current physics rule (so neither mechanism catches them). Resolving
+//     this — either by writing down a `src/core/`-style guarded exemption
+//     for a write-only stats timestamp, or by having physics's own owner
+//     move the read somewhere outside this checked closure — is a decision
+//     for whoever owns `src/physics/`, not this ticket.
 //
 // ---------------------------------------------------------------------------
 // How imports are parsed — no dependency, two honest regex passes
@@ -114,11 +135,12 @@ Usage:
   node tools/check-imports.mjs [--root <dir>] [--json <path>] [--verbose] [--help]
 
 Walks the transitive import closure of every file under the N-surface roots
-(src/combat/, src/items/, src/skills/, src/nav/, src/world/data/, every
-data/ directory, and src/core/, src/physics/, src/actors/ for the 'three'
-import only) and fails if the closure reaches the 'three' package or the
-document/window/performance.now() browser globals. See this file's header
-for the full contract.
+(src/combat/, src/items/, src/skills/, src/nav/, src/world/, src/world/data/,
+src/actors/, every data/ directory — all checked for 'three' AND
+document/window/performance.now(); src/core/ and src/physics/ for the
+'three' import only (O-22, O-29) — see this file's header for why those two
+keep the narrower rule) and fails if the closure reaches a forbidden
+reference. See this file's header for the full contract.
 
 Options:
   --root <dir>    scan <dir> as if it were src/ (roots are resolved relative
@@ -560,20 +582,27 @@ function main() {
   const srcRoot = args.root ? resolve(args.root) : join(REPO_ROOT, 'src');
   DISPLAY_ROOT = args.root ? srcRoot : REPO_ROOT;
 
-  // Required roots, verbatim from 12-testing.md §2.1, plus src/core/,
-  // src/physics/ and src/actors/ (see header — all three checked for
-  // `three` only, none of the five gameplay roots' full document/window/
-  // performance.now() sweep). Each root not existing yet is a NOTE, not a
-  // failure.
+  // Required roots, verbatim from 12-testing.md §2.1 (`combat`, `items`,
+  // `skills`, `nav`, `world/data`), plus `src/core/` (three-only, O-22
+  // precedent for a legitimate guarded browser-global read) and, per O-29:
+  // `src/world/` added as a full root (WRLD-1/2/3 verified headless by
+  // design — see this ticket's report); `src/actors/` upgraded from
+  // three-only to the full sweep (verified clean); `src/physics/` LEFT at
+  // three-only, unchanged, because it is NOT verified clean under the full
+  // sweep — see the header's O-29 note for `src/physics/separate.js`'s two
+  // real `performance.now()` reads and why this ticket does not edit that
+  // file to force the stricter check through. Each root not existing yet is
+  // a NOTE, not a failure.
   const declaredRoots = [
     { path: join(srcRoot, 'combat'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'items'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'skills'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'nav'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'world', 'data'), checkThree: true, checkGlobals: true },
+    { path: join(srcRoot, 'world'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'core'), checkThree: true, checkGlobals: false },
     { path: join(srcRoot, 'physics'), checkThree: true, checkGlobals: false },
-    { path: join(srcRoot, 'actors'), checkThree: true, checkGlobals: false },
+    { path: join(srcRoot, 'actors'), checkThree: true, checkGlobals: true },
   ];
 
   // "every data/ directory" — auto-discovered, deduped against the explicit

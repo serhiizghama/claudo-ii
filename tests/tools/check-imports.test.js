@@ -153,22 +153,60 @@ test('core/: three fails it, but a guarded window/document reference does not (c
   });
 });
 
-test('physics/ and actors/ (O-22): three fails them; window/document does not (three-only, matching core)', () => {
+test('physics/ (O-22, still three-only after O-29): three fails it; window/document/performance.now() does not', () => {
+  // O-29 verified src/physics/separate.js genuinely reads performance.now()
+  // in real (non-comment) code, outside any fixedUpdate body, to write a
+  // write-only stats timestamp — a real, already-shipped usage this ticket
+  // does not own and will not edit around. physics therefore keeps the
+  // three-only rule unchanged; see tools/check-imports.mjs's own header for
+  // the full reasoning and this ticket's report for the file:line finding.
   withTempRoot((root) => {
     writeFile(root, 'physics/imports-three.js', `import * as THREE from 'three';\nexport const v = new THREE.Vector3();\n`);
-    writeFile(root, 'physics/touches-window.js', `export function w() { return window.devicePixelRatio; }\n`);
-    writeFile(root, 'actors/imports-three.js', `import * as THREE from 'three';\nexport const q = new THREE.Quaternion();\n`);
-    writeFile(root, 'actors/touches-document.js', `export function d() { return document.title; }\n`);
+    writeFile(root, 'physics/touches-window.js', `export function w() { return window.devicePixelRatio + performance.now(); }\n`);
 
     const result = run(['--root', root]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /FAIL {2}12\.N01 {2}physics\/imports-three\.js:1 {2}imports 'three'/);
-    assert.match(result.stderr, /FAIL {2}12\.N01 {2}actors\/imports-three\.js:1 {2}imports 'three'/);
     assert.doesNotMatch(result.stderr, /physics\/touches-window\.js/);
-    assert.doesNotMatch(result.stderr, /actors\/touches-document\.js/);
-    // Exactly the two three-imports, nothing else.
     const failLines = result.stderr.trim().split('\n').filter((l) => l.startsWith('FAIL'));
-    assert.equal(failLines.length, 2);
+    assert.equal(failLines.length, 1);
+  });
+});
+
+test('actors/ (O-29): upgraded to the full N-surface check — three, window, document AND performance.now() all fail it now', () => {
+  // Verified clean of every forbidden global on the real src/actors/ tree
+  // (see this ticket's report), so — unlike physics — actors gets the same
+  // full sweep combat/items/skills/nav/world already get.
+  withTempRoot((root) => {
+    writeFile(root, 'actors/imports-three.js', `import * as THREE from 'three';\nexport const q = new THREE.Quaternion();\n`);
+    writeFile(root, 'actors/touches-document.js', `export function d() { return document.title; }\n`);
+    writeFile(root, 'actors/touches-window.js', `export function w() { return window.innerWidth; }\n`);
+    writeFile(root, 'actors/reads-clock.js', `export function c() { return performance.now(); }\n`);
+
+    const result = run(['--root', root]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}actors\/imports-three\.js:1 {2}imports 'three'/);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}actors\/touches-document\.js:1 {2}references 'document'/);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}actors\/touches-window\.js:1 {2}references 'window'/);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}actors\/reads-clock\.js:1 {2}references 'performance\.now\(\)'/);
+    const failLines = result.stderr.trim().split('\n').filter((l) => l.startsWith('FAIL'));
+    assert.equal(failLines.length, 4);
+  });
+});
+
+test('world/ and nav/ (O-29): both are full N-surface roots — three and every forbidden global all fail', () => {
+  withTempRoot((root) => {
+    writeFile(root, 'world/imports-three.js', `import * as THREE from 'three';\nexport const v = new THREE.Vector3();\n`);
+    writeFile(root, 'world/touches-window.js', `export function w() { return window.innerWidth; }\n`);
+    writeFile(root, 'nav/imports-three.js', `import * as THREE from 'three';\nexport const v = new THREE.Vector3();\n`);
+    writeFile(root, 'nav/reads-clock.js', `export function c() { return performance.now(); }\n`);
+
+    const result = run(['--root', root]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}world\/imports-three\.js:1 {2}imports 'three'/);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}world\/touches-window\.js:1 {2}references 'window'/);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}nav\/imports-three\.js:1 {2}imports 'three'/);
+    assert.match(result.stderr, /FAIL {2}12\.N01 {2}nav\/reads-clock\.js:1 {2}references 'performance\.now\(\)'/);
   });
 });
 

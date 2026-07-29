@@ -28,6 +28,7 @@ import { EventBus } from '../../src/core/events.js';
 import { QUALITY_PRESETS } from '../../src/core/config.js';
 import { makeStubCtx } from '../helpers/actor.js';
 import { assertAllocationFree, hasGc } from '../helpers/alloc.js';
+import { hashState } from '../helpers/hash.js';
 
 // ---------------------------------------------------------------------------
 // ctx builders
@@ -457,6 +458,95 @@ test('all returns the same reference every call (Alloc: no)', async () => {
   actors.spawn({});
   const a2 = actors.all;
   assert.equal(a1, a2);
+});
+
+// ---------------------------------------------------------------------------
+// O-33 — `all`'s Proxy view was missing `has`/`getOwnPropertyDescriptor`, so
+// `HasProperty(all, idx)` was false for every live index even though `get`
+// answered correctly. Every index-based Array.prototype algorithm that
+// checks HasProperty before reading (slice/map/filter/forEach/indexOf/...)
+// therefore saw the whole view as holes and silently did nothing, while
+// for...of/spread/Array.from (which don't consult HasProperty) worked fine
+// — a defect invisible to naive smoke tests. The real payoff is the
+// hashState case below: TEST-1's own canonicalization calls `.slice()`
+// before sorting, so a live world hashed through `actors.all` was blind to
+// actor position entirely.
+// ---------------------------------------------------------------------------
+
+test('O-33: slice/map/filter/forEach/indexOf all see every live actor through the `all` view', async () => {
+  const { actors } = await makeActors('high');
+  const a = actors.spawn({ x: 0, z: 0 });
+  const b = actors.spawn({ x: 1, z: 0 });
+  const c = actors.spawn({ x: 2, z: 0 });
+  const all = actors.all;
+
+  assert.deepEqual(all.slice(), [a, b, c]);
+  assert.deepEqual(all.map((actor) => actor.id), [a.id, b.id, c.id]);
+  assert.equal(all.filter(Boolean).length, 3);
+
+  let seen = 0;
+  all.forEach((actor) => {
+    assert.ok(actor === a || actor === b || actor === c);
+    seen++;
+  });
+  assert.equal(seen, 3);
+
+  assert.equal(all.indexOf(a), 0);
+  assert.equal(all.indexOf(b), 1);
+  assert.equal(all.indexOf(c), 2);
+  assert.equal(all.indexOf({}), -1);
+});
+
+test('O-33: `0 in all` / Object.hasOwn(all, 0) are true in range and false out of range, exactly at _liveCount', async () => {
+  const { actors } = await makeActors('high');
+  actors.spawn({});
+  actors.spawn({});
+  const all = actors.all;
+
+  assert.equal(0 in all, true);
+  assert.equal(1 in all, true);
+  assert.equal(Object.hasOwn(all, 0), true);
+  assert.equal(Object.hasOwn(all, 1), true);
+
+  // Exactly at _liveCount (2 live actors -> index 2 is one past the end).
+  assert.equal(2 in all, false);
+  assert.equal(Object.hasOwn(all, 2), false);
+  assert.equal(99 in all, false);
+  assert.equal(Object.hasOwn(all, 99), false);
+});
+
+test('O-33: the `all` view stays read-only after the has/getOwnPropertyDescriptor fix — set/delete/defineProperty still throw', async () => {
+  const { actors } = await makeActors('high');
+  actors.spawn({});
+  const all = actors.all;
+
+  assert.throws(() => {
+    all[0] = null;
+  });
+  assert.throws(() => {
+    delete all[0];
+  });
+  assert.throws(() => {
+    Object.defineProperty(all, 0, { value: null });
+  });
+  assert.equal(actors.count, 1, 'a failed external mutation must not have changed the live actor list');
+});
+
+test('O-33: hashState(actors.all) changes after a real moveTo and matches the hash of the same actors as a plain array', async () => {
+  const { actors } = await makeActors('high');
+  const a = actors.spawn({ x: 1.5, z: -2.25 });
+
+  const viaAllBefore = hashState({ actors: actors.all, items: [], rngStreams: {}, step: 0 });
+  const viaPlainBefore = hashState({ actors: [a], items: [], rngStreams: {}, step: 0 });
+  assert.equal(viaAllBefore, viaPlainBefore, 'hashing the live view must match hashing the same actors as a plain array');
+
+  actors.moveTo(a, 0.25, 0);
+
+  const viaAllAfter = hashState({ actors: actors.all, items: [], rngStreams: {}, step: 0 });
+  const viaPlainAfter = hashState({ actors: [a], items: [], rngStreams: {}, step: 0 });
+
+  assert.notEqual(viaAllAfter, viaAllBefore, 'hashState(actors.all) must change after a real moveTo — this is the whole point of O-33');
+  assert.equal(viaAllAfter, viaPlainAfter, 'hashing the live view must still match hashing the same actors as a plain array after the move');
 });
 
 // ---------------------------------------------------------------------------
