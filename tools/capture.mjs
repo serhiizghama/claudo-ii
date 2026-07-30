@@ -22,17 +22,62 @@
 //      `<base>/?capture=1&lockstep=1[&seed=<hex>]`, sized 1280×720
 //      (12-testing.md §6 — the pixel gate's fixed resolution), and waits for
 //      `window.__READY__ === true` (`src/main.js`'s B13 handshake).
-//   4. Pumps the shot's own `steps` (0 for `boot_clean`) through
+//   4. If the shot declares a `setup` (`src/dev/shots.js`), runs it ONCE,
+//      inside the page, against the live `window.__ENGINE__.ctx` — see
+//      "Running a shot's setup" below. `boot_clean`'s `setup` is `null`, so
+//      this step is a strict no-op for it (ARCHITECTURE.md rule 8 / this
+//      tool's own contract: the boot must never change under this).
+//   5. Pumps the shot's own `steps` (0 for `boot_clean`) through
 //      `window.__ENGINE__.frame(FIXED_DT)` — never rAF — using
 //      `src/dev/shots.js`'s `pumpShot`, injected into the page (see that
 //      file's header for why this is safe and why it is the ONE copy of the
 //      stepping loop).
-//   5. Reads the `#game` canvas back via `canvas.toDataURL('image/png')`
+//   6. Reads the `#game` canvas back via `canvas.toDataURL('image/png')`
 //      (see "Reading the pixels" below), decodes it with `pngjs`, and
-//      asserts it is non-blank and exactly 1280×720.
-//   6. Writes the PNG to `shots/<name>.png` (gitignored scratch output) or,
+//      asserts it is non-blank and exactly 1280×720. Also reads
+//      `renderer.info.render.calls` off the live `render` subsystem — see
+//      "Draw-call count" below — so a shot's acceptance criterion (e.g. `08
+//      §11 step 4`'s "1 draw call") is a number this tool prints, not one a
+//      caller has to go dig for separately.
+//   7. Writes the PNG to `shots/<name>.png` (gitignored scratch output) or,
 //      with `--bless`, to `tests/fixtures/shots/<name>.png` — the committed
 //      baseline `tools/imagediff.mjs` compares against.
+//
+// ---------------------------------------------------------------------------
+// Running a shot's setup
+// ---------------------------------------------------------------------------
+// `src/dev/shots.js`'s header ("pumpShot — AND a shot's own setup — must
+// survive toString()+eval") is the contract this step relies on: `setup`, if
+// present, has zero free variables, so its source can be lifted into the
+// page the exact same way `pumpShot`'s already is, a few lines below. It is
+// called as `setup(window.__ENGINE__, window.__ENGINE__.ctx)` —
+// `src/core/engine.js`'s constructor stores the real `ctx` on the engine
+// instance verbatim (`this.ctx = ctx`), so this is the one live object a
+// page-evaluated function can reach `ctx.scene`/`ctx.get(id)` through without
+// importing anything. This has to run BEFORE `pumpShot` ("run once before
+// the pump" — shots.js's own doc on the field), so a `setup` that spawns
+// something sees it survive however many steps the shot then pumps.
+// `await`ed here regardless of whether it returns a value or a `Promise`
+// (the documented `void | Promise<void>` shape) — awaiting a plain value is
+// a no-op, so this stays correct for a synchronous `setup` too (every
+// `setup` registered today, including `actor_ranker`'s, is synchronous).
+//
+// ---------------------------------------------------------------------------
+// Draw-call count
+// ---------------------------------------------------------------------------
+// `ARCHITECTURE.md`'s "Render integration" names `r.renderer` (the real
+// `THREE.WebGLRenderer`) as part of `render`'s public surface
+// (`ctx.get('render').renderer`); `renderer.info.render.calls` is Three's own
+// running count of draw calls issued by the LAST completed `render()` call —
+// exactly what `08 §11 step 4`'s "1 draw call for the actor" and similar
+// per-shot criteria need proof of, not just an assertion. Read once, right
+// after the pump (so it reflects the frame this tool is about to screenshot,
+// not a stale prior one), and reported as `drawCalls` in both the console
+// summary and `--json` output. Guarded with a `typeof` check the same way
+// `src/main.js#renderFrame` guards `ctx.peek('render')` — `render` is always
+// registered in practice (`src/main.js`'s B4), but this tool never assumes
+// another subsystem's shape without checking, the same discipline
+// `ARCHITECTURE.md` rule 2 asks of every subsystem.
 //
 // ---------------------------------------------------------------------------
 // Serving the build
@@ -401,6 +446,7 @@ async function main() {
   let png = null;
   let stepsRan = 0;
   let bootLog = null;
+  let drawCalls = null;
   let baseUrl = args.baseUrl;
 
   try {
@@ -442,6 +488,26 @@ async function main() {
       }
     }
 
+    // If the shot declares a setup, run it once, before the pump — see this
+    // file's header, "Running a shot's setup". `boot_clean.setup === null`,
+    // so this whole block is skipped for it: byte-for-byte the same
+    // behaviour as before this ticket, which is what keeps `imagediff --shot
+    // boot_clean` at `diffPixels=0`.
+    if (shot.setup) {
+      if (args.verbose) console.log(`[capture] running setup for shot '${args.shot}'`);
+      await page.evaluate(
+        ({ src }) => {
+          // eslint-disable-next-line no-eval -- see src/dev/shots.js's
+          // header: a shot's `setup`, like `pumpShot`, is lifted verbatim
+          // into the page because window.__ENGINE__ (and its .ctx) only
+          // exist in this realm.
+          const fn = (0, eval)(`(${src})`);
+          return fn(window.__ENGINE__, window.__ENGINE__.ctx);
+        },
+        { src: shot.setup.toString() },
+      );
+    }
+
     stepsRan = await page.evaluate(
       ({ src, steps, dt }) => {
         // eslint-disable-next-line no-eval -- see src/dev/shots.js's header:
@@ -452,6 +518,19 @@ async function main() {
       },
       { src: pumpShot.toString(), steps: shot.steps, dt: FIXED_DT },
     );
+
+    // See this file's header, "Draw-call count" — read right after the
+    // pump, before the screenshot, so it reflects the frame about to be
+    // captured. `render` is always registered in practice, but this tool
+    // never assumes another subsystem's shape without checking (same
+    // discipline as `src/main.js#renderFrame`'s own `ctx.peek` guard).
+    drawCalls = await page.evaluate(() => {
+      const engine = window.__ENGINE__;
+      const render = engine && engine.ctx && typeof engine.ctx.peek === 'function' ? engine.ctx.peek('render') : null;
+      return render && render.renderer && render.renderer.info && render.renderer.info.render
+        ? render.renderer.info.render.calls
+        : null;
+    });
 
     const canvasExists = await page.evaluate(() => document.getElementById('game') !== null);
     if (!canvasExists) throw new Error("page has no '#game' canvas to read pixels from");
@@ -526,7 +605,7 @@ async function main() {
   }
 
   console.log(
-    `capture.mjs  seed=${seedHex}  shot=${args.shot}  size=${png.width}x${png.height}  nonBlankPixels=${nb.nonBlankCount}/${nb.totalPixels}  stepsRan=${stepsRan}  blessed=${args.bless}  out=${relative(REPO_ROOT, outPath)}  elapsed=${(elapsedMs / 1000).toFixed(2)}s`,
+    `capture.mjs  seed=${seedHex}  shot=${args.shot}  size=${png.width}x${png.height}  nonBlankPixels=${nb.nonBlankCount}/${nb.totalPixels}  drawCalls=${drawCalls}  stepsRan=${stepsRan}  blessed=${args.bless}  out=${relative(REPO_ROOT, outPath)}  elapsed=${(elapsedMs / 1000).toFixed(2)}s`,
   );
   console.log(`  RESULT: ${exitCode === 0 ? 'PASS' : exitCode === 4 ? 'PASS (budget exceeded)' : `FAIL (${failures.length})`}`);
 
@@ -542,6 +621,7 @@ async function main() {
       nonBlankPixels: nb.nonBlankCount,
       totalPixels: nb.totalPixels,
       samplePixel: nb.samplePixel,
+      drawCalls,
       stepsRan,
       blessed: args.bless,
       outPath: relative(REPO_ROOT, outPath),

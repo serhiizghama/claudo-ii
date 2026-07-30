@@ -5,10 +5,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Capture / profiling output
-shots/
-baselines/
-profiles/
+# Capture / profiling output (repo root only — tests/fixtures/shots/ is the
+# blessed pixel baseline and must stay tracked)
+/shots/
+/baselines/
+/profiles/
 
 # Environment
 .env

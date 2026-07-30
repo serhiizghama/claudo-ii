@@ -112,7 +112,7 @@
 // so today only bad CLI usage reaches this code).
 
 import { readFileSync, existsSync, statSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve, extname } from 'node:path';
+import { dirname, join, relative, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -323,8 +323,16 @@ const JS_EXT = new Set(['.js', '.mjs']);
  * deterministic output ordering (12-testing.md P2). Returns `[]` for a
  * missing directory — a not-yet-created N-surface root is "nothing to check
  * yet", not an error (this ticket's brief, restating IMPLEMENTATION_PLAN's
- * milestone order: M1-M4 create these directories). */
-function collectFiles(dir) {
+ * milestone order: M1-M4 create these directories).
+ *
+ * `excludeDirs` (a `Set` of absolute directory paths, optional) is never
+ * descended into — D-13's `src/actors/archetypes/` carve-out (see the
+ * `declaredRoots` entry below) needs this: `src/actors/` itself must NOT see
+ * `archetypes/`'s files as part of ITS OWN (three-forbidding) walk, or the
+ * narrower rule the dedicated `archetypes/` root applies below would never
+ * matter — this root's stricter rule would already have failed on the same
+ * file first. */
+function collectFiles(dir, excludeDirs) {
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
   const out = [];
   const stack = [dir];
@@ -346,6 +354,7 @@ function collectFiles(dir) {
     for (const entry of entries) {
       const full = join(d, entry.name);
       if (entry.isDirectory()) {
+        if (excludeDirs && excludeDirs.has(full)) continue;
         stack.push(full);
       } else if (entry.isFile() && JS_EXT.has(extname(entry.name))) {
         out.push(full);
@@ -457,9 +466,26 @@ function scanForbiddenGlobals(maskedSrc) {
 // The closure walk, one root at a time
 // ---------------------------------------------------------------------------
 
+/** `true` if `file` is `dir` itself or lives anywhere under it, for each `dir`
+ * in `dirs`. Used so a root's TRANSITIVE walk (an import reached through a
+ * chain, not one of its own seed files) respects the same `exclude` list
+ * `collectFiles` already applies to seeds — added for D-13/ACTR-6's
+ * `src/actors/index.js` importing `src/actors/archetypes/bone_ranker.js`:
+ * without this, the `actors` root would re-discover that file via the import
+ * chain and fail on its `three` import under `actors`' own stricter rule,
+ * even though a dedicated `archetypes/` root (this file's `declaredRoots`)
+ * already checks it correctly. */
+function isUnderAnyDir(file, dirs) {
+  if (!dirs || dirs.length === 0) return false;
+  for (const d of dirs) {
+    if (file === d || file.startsWith(d + sep)) return true;
+  }
+  return false;
+}
+
 /**
  * @param {string[]} seedFiles - absolute paths, already known to exist.
- * @param {{ checkThree: boolean, checkGlobals: boolean }} rules
+ * @param {{ checkThree: boolean, checkGlobals: boolean, exclude?: string[] }} rules
  * @param {{ verbose: boolean }} opts
  * @returns {{ violations: object[], filesVisited: number }}
  */
@@ -507,6 +533,12 @@ function walkClosure(seedFiles, rules, opts) {
       }
       const resolved = resolveImport(file, spec);
       if (resolved.kind === 'resolved') {
+        if (isUnderAnyDir(resolved.file, rules.exclude)) {
+          // Out of this root's jurisdiction — see isUnderAnyDir's own
+          // comment. A dedicated root already checks this file under its
+          // own (narrower or different) rules; do not re-check it here.
+          continue;
+        }
         if (!visited.has(resolved.file)) {
           queue.push({ file: resolved.file, chain: [...chain, resolved.file] });
         }
@@ -593,6 +625,24 @@ function main() {
   // real `performance.now()` reads and why this ticket does not edit that
   // file to force the stricter check through. Each root not existing yet is
   // a NOTE, not a failure.
+  //
+  // `src/actors/archetypes/` (D-13, ACTR-6): `08-characters-visual.md` §2/
+  // §3.4 requires one real `THREE.SkinnedMesh`/`BufferGeometry`/`Skeleton`
+  // per actor — a draw call cannot exist without a `three` object — but
+  // `src/actors/` is not one of 12-testing.md §2.1's five literal roots (it
+  // was added beyond spec in M1, O-22/O-29), so relaxing it for exactly the
+  // one subdirectory that must build real GPU resources is a self-imposed
+  // rule the project can narrow, not a spec requirement to break. This is
+  // the SAME "checked for the `three` import only" mechanism `src/core/`
+  // already uses above (`checkThree: true, checkGlobals: false` there;
+  // MIRRORED here as `checkThree: false, checkGlobals: true` — the opposite
+  // pair, since archetypes need `three`, not the browser globals). Unlike
+  // `src/core/`, this narrower rule applies to a subdirectory NESTED inside
+  // an already-declared stricter root, so `archetypes/` is also added to the
+  // `actors` root's own `exclude` list below — otherwise the `actors` root's
+  // full sweep would still walk into and fail on the very files this entry
+  // exists to exempt, before this entry's own (correct) rule ever ran.
+  const archetypesDir = join(srcRoot, 'actors', 'archetypes');
   const declaredRoots = [
     { path: join(srcRoot, 'combat'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'items'), checkThree: true, checkGlobals: true },
@@ -602,7 +652,9 @@ function main() {
     { path: join(srcRoot, 'world'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'core'), checkThree: true, checkGlobals: false },
     { path: join(srcRoot, 'physics'), checkThree: true, checkGlobals: false },
-    { path: join(srcRoot, 'actors'), checkThree: true, checkGlobals: true },
+    { path: join(srcRoot, 'actors'), checkThree: true, checkGlobals: true, exclude: [archetypesDir] },
+    { path: archetypesDir, checkThree: false, checkGlobals: true },
+    { path: join(srcRoot, 'ai'), checkThree: true, checkGlobals: true },
   ];
 
   // "every data/ directory" — auto-discovered, deduped against the explicit
@@ -622,7 +674,7 @@ function main() {
 
   for (const root of declaredRoots) {
     const label = relative(DISPLAY_ROOT, root.path);
-    const seedFiles = collectFiles(root.path);
+    const seedFiles = collectFiles(root.path, root.exclude ? new Set(root.exclude) : undefined);
     if (!existsSync(root.path)) {
       notes.push(`NOTE  12.N01  ${label}  root does not exist yet — nothing to check  expected=—  actual=—  delta=—`);
       continue;

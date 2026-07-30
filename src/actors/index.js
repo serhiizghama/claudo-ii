@@ -113,6 +113,25 @@ import {
   beginActorWrite,
   endActorWrite,
 } from './motion.js';
+import { spawnBoneRanker } from './archetypes/bone_ranker.js';
+
+// ---------------------------------------------------------------------------
+// ACTR-6 — dev-only archetype-visual escape hatch (see `__archetypeVisuals`
+// on the class below for the full reasoning). `archetypes/bone_ranker.js` is
+// the ONE file under `src/actors/` allowed to import `three` (D-13); this
+// import pulls that in transitively, which is why `tools/check-imports.mjs`
+// carries a matching fix (this ticket's report) so the `actors` root's own
+// transitive walk does not re-discover and fail on it — a dedicated
+// `archetypes/` root already checks that file, under its own narrower rule.
+// ---------------------------------------------------------------------------
+
+/** `archetypeId -> (ctx, opts) => { built, dispose }`. Exactly one entry
+ * today — `SPAWN_SPEC_DEFAULTS.archetypeId` below already defaults to
+ * `'bone_ranker'`, in anticipation of this. Frozen, module-level, built
+ * once — not per instance, not per call. */
+const ARCHETYPE_VISUALS = Object.freeze({
+  bone_ranker: spawnBoneRanker,
+});
 
 /** `01-data-model.md` §11.1's `Actor` row, low/medium/high/ultra — the
  * RECORD pool capacity, not `q.maxActors` (the smaller *simulation* cap;
@@ -197,6 +216,21 @@ export class ActorsSystem {
      * `world.serviceZoneRequest()` (see `motion.js`'s "teleport" section for
      * the full reasoning). */
     this._ctx = null;
+    /** DEV-ONLY (ACTR-6): `archetypeId -> spawnFn`, reached as
+     * `ctx.get('actors').__archetypeVisuals`. The `__`-prefix marks it as
+     * deliberately OUTSIDE `02-api-contracts.md` §7's documented surface —
+     * the same convention this codebase already uses for a harness-only
+     * escape hatch (`engine.__boot`, `window.__ENGINE__`, `window.__PREWARM__`
+     * — `src/main.js`'s B13/B8). Its only caller today is
+     * `src/dev/shots.js`'s `actor_ranker` shot, running inside a live page
+     * against the real `ctx` (see that file's header) — never gameplay code,
+     * never another subsystem. It builds and adds a static L0 mesh to
+     * `ctx.scene`; it does NOT touch `spawn()`/the pool/`fixedUpdate`
+     * ordering above, and `spawn()`'s own behaviour is byte-for-byte
+     * unchanged by this addition — no automatic archetype-to-visual wiring
+     * exists on the real spawn path yet (a later ticket's job; see this
+     * ticket's report). */
+    this.__archetypeVisuals = ARCHETYPE_VISUALS;
   }
 
   async init(ctx) {

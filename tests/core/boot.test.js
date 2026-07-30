@@ -52,8 +52,8 @@ test('boot(): completes to the end with zero subsystems registered, and does not
   assert.ok(result.config);
 });
 
-test('bootLog: stages appear in order B1..B13; ui/fx/save are absent and marked skipped', async () => {
-  const { bootLog } = await boot(bootOpts());
+test('bootLog: stages appear in order B1..B13; each of B7/B10/B11/B12 is done iff its owning subsystem is registered', async () => {
+  const { bootLog, ctx } = await boot(bootOpts());
   assert.deepEqual(bootLog.map((e) => e.id), B_IDS);
 
   for (const id of B_IDS) {
@@ -63,28 +63,37 @@ test('bootLog: stages appear in order B1..B13; ui/fx/save are absent and marked 
     assert.ok(['done', 'skipped'].includes(entry.status), `${id} has an unexpected status: ${entry.status}`);
   }
 
-  const skippedIds = ['B7', 'B10', 'B11', 'B12']; // depend on ui / fx / save
-  for (const id of skippedIds) {
+  // B7/B12 depend on 'ui', B10 on 'fx', B11 on 'save' (src/main.js's
+  // STAGE_META / boot() body). This asserts the RULE — a gated stage is
+  // 'done' exactly when its owner is registered, 'skipped' with a reason
+  // otherwise — derived from ctx.has(), never a hardcoded list of which
+  // ids are absent today. UI-1 registering `ui` is precisely the event the
+  // old, hardcoded version of this test could not survive (O-27: a test
+  // written while a subsystem didn't exist yet, encoding "it never will");
+  // `save`/`fx` landing later (M6/M8) must not require touching this test
+  // again either.
+  const gatedStageOwner = { B7: 'ui', B10: 'fx', B11: 'save', B12: 'ui' };
+  for (const [id, ownerId] of Object.entries(gatedStageOwner)) {
     const entry = bootLog.find((e) => e.id === id);
-    assert.equal(entry.status, 'skipped', `${id} should be skipped with no ui/fx/save registered`);
-    assert.ok(typeof entry.reason === 'string' && entry.reason.length > 0, `${id} skip needs a reason`);
+    if (ctx.has(ownerId)) {
+      assert.equal(entry.status, 'done', `${id} should be done — '${ownerId}' is registered`);
+    } else {
+      assert.equal(entry.status, 'skipped', `${id} should be skipped — '${ownerId}' is not registered`);
+      assert.ok(typeof entry.reason === 'string' && entry.reason.length > 0, `${id} skip needs a reason`);
+    }
   }
 
-  for (const id of B_IDS.filter((i) => !skippedIds.includes(i))) {
+  // Every stage NOT gated on ui/fx/save must always complete, regardless of
+  // which of those three happen to be registered.
+  const gatedIds = Object.keys(gatedStageOwner);
+  for (const id of B_IDS.filter((i) => !gatedIds.includes(i))) {
     const entry = bootLog.find((e) => e.id === id);
     assert.equal(entry.status, 'done', `${id} should be done`);
   }
 });
 
-test('bootLog: B7/B10/B11/B12 complete once ui/fx/save are registered', async () => {
+test('bootLog: B10/B11 complete once fx/save are registered; B7/B12 already reflect the real, always-registered ui subsystem', async () => {
   const calls = [];
-  class Ui {
-    static id = 'ui';
-    static deps = [];
-    setScreen(screen) {
-      calls.push(['ui.setScreen', screen]);
-    }
-  }
   class Fx {
     static id = 'fx';
     static deps = [];
@@ -103,21 +112,30 @@ test('bootLog: B7/B10/B11/B12 complete once ui/fx/save are registered', async ()
     }
   }
 
-  const { bootLog } = await boot(bootOpts({ systems: [Ui, Fx, Save] }));
+  // No stub 'ui' here — `src/main.js` (UI-1) now registers a real one
+  // unconditionally, so `Registry.add` would throw on the id collision (see
+  // this test's own git history: that is exactly the failure landing `ui`
+  // produced). This assumption is asserted explicitly below, so a future
+  // change that makes `ui` no longer always-registered fails loudly here
+  // instead of a confusing collision three lines down.
+  const { bootLog, ctx } = await boot(bootOpts({ systems: [Fx, Save] }));
+  assert.ok(ctx.has('ui'), "this test assumes src/main.js always registers a real 'ui' subsystem");
 
   for (const id of ['B7', 'B10', 'B11', 'B12']) {
     const entry = bootLog.find((e) => e.id === id);
     assert.equal(entry.status, 'done', `${id} should be done once its owner is registered`);
   }
 
-  // B7 shows the boot veil first; B12 lands on character_create because
-  // every slot is null (01-data-model.md §10.2). fx's own prewarmMaterials
-  // is never called from here — B10 is fx's own responsibility (11-flows.md
-  // B10) and it's also excluded from core/prewarm.js's B8 dispatch by design.
-  assert.deepEqual(calls[0], ['ui.setScreen', 'boot']);
+  // B12 lands on character_create because every slot is null
+  // (01-data-model.md §10.2) — the real ui's own setScreen() call, recorded
+  // as bootLog data rather than observed through an injected stub.
+  assert.equal(bootLog.find((e) => e.id === 'B12').screen, 'character_create');
+
+  // fx's own prewarmMaterials is never called from here — B10 is fx's own
+  // responsibility (11-flows.md B10) and it's also excluded from
+  // core/prewarm.js's B8 dispatch by design.
   assert.ok(calls.some((c) => c[0] === 'save.settings'));
   assert.ok(!calls.some((c) => c[0] === 'fx.prewarmMaterials'));
-  assert.deepEqual(calls[calls.length - 1], ['ui.setScreen', 'character_create']);
 });
 
 test('ctx: carries every field docs/ARCHITECTURE.md promises', async () => {
@@ -295,9 +313,35 @@ test('subsystems: init runs in topological order, not registration order', async
 
 test('prewarm: runs between B6 and B9, and leaves ctx.rng untouched', async () => {
   let prewarmCalls = 0;
+  let rngSnapshotAfterInit = null;
   class Stub {
     static id = 'stub';
-    static deps = [];
+    // O-36: `combat` (CMBT-3) now takes ONE `ctx.rng.fork()` in its own
+    // `init()` (`resolve()`'s R2/R3/R4/R5/R6/R14(c) are real draws — see
+    // `src/combat/resolve.js`'s header and `ARCHITECTURE.md`'s determinism
+    // contract: "one fork per subsystem ... in init(), never re-forked per
+    // event"). `fork()` itself consumes four `u32()` draws from the ROOT
+    // stream to seed the child, so by the time every subsystem's `init()`
+    // has run, `ctx.rng` is no longer byte-identical to a fresh, never-
+    // advanced `Rng` — this test's OLD assertion checked exactly that, for
+    // a reason that has nothing to do with prewarm.
+    //
+    // What this test actually wants to guard is prewarm's OWN contract
+    // (ARCHITECTURE.md, "Pre-warm": "without ... touching the clock/RNG").
+    // This stub depends on 'combat' so its own `init()` runs strictly after
+    // combat's fork (topological order, `Registry.resolve()`), and it
+    // captures `ctx.rng`'s raw state right there — i.e. "the RNG state
+    // after init() [of every real subsystem] and before prewarm [B8]",
+    // exactly as this rewrite is asked to do. The assertion below then
+    // compares that snapshot against `ctx.rng` at the very end of `boot()`
+    // (after B8's prewarm AND the B9-B13 tail, three pumped lockstep
+    // `fixedUpdate` frames under Node) — proving prewarm (and everything
+    // after it, today) draws nothing, rather than proving the whole
+    // registered set does from a virgin seed.
+    static deps = ['combat'];
+    async init(ctx) {
+      rngSnapshotAfterInit = { s0: ctx.rng.s0, s1: ctx.rng.s1, s2: ctx.rng.s2, s3: ctx.rng.s3 };
+    }
     async prewarmMaterials() {
       prewarmCalls++;
     }
@@ -311,13 +355,11 @@ test('prewarm: runs between B6 and B9, and leaves ctx.rng untouched', async () =
   assert.ok(i6 < i8 && i8 < i9, 'B8 must sit strictly between B6 and B9');
   assert.equal(prewarmCalls, 1);
 
-  // Nothing drew from the root stream — it must equal a fresh Rng seeded
-  // with the same (deterministic) worldSeed.
-  const fresh = new Rng(0x5eed1234);
-  assert.equal(ctx.rng.s0, fresh.s0);
-  assert.equal(ctx.rng.s1, fresh.s1);
-  assert.equal(ctx.rng.s2, fresh.s2);
-  assert.equal(ctx.rng.s3, fresh.s3);
+  assert.ok(rngSnapshotAfterInit, 'Stub.init() must have run (after combat\'s) and captured a snapshot');
+  assert.equal(ctx.rng.s0, rngSnapshotAfterInit.s0);
+  assert.equal(ctx.rng.s1, rngSnapshotAfterInit.s1);
+  assert.equal(ctx.rng.s2, rngSnapshotAfterInit.s2);
+  assert.equal(ctx.rng.s3, rngSnapshotAfterInit.s3);
 });
 
 test('B13: BOOT_FRAMES is 3, and __READY__/__ENGINE__/__PREWARM__ land on the given global stub', async () => {
