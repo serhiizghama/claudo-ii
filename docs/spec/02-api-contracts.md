@@ -627,8 +627,9 @@ they are public so the balance harness can drive them directly.
 | `removeStatus` | `(actor:Actor, status:string) => int` — instances removed | Y | no |
 | `hasStatus` | `(actor:Actor, status:string) => boolean` — bitfield test | Y | no |
 | `statusStacks` | `(actor:Actor, status:string) => int` | Y | no |
-| `statusRemaining` | `(actor:Actor, status:string) => number` — seconds, 0 if absent | Y | no |
+| `statusRemaining` | `(actor:Actor, status:string, step:int) => number` — seconds, 0 if absent | Y | no |
 | `clearStatuses` | `(actor:Actor, onlyHarmful:boolean) => void` | Y | no |
+| `expireBySource` | `(actor:Actor, sourceId:int) => int` — instances removed | Y | no |
 
 ### Presentation
 
