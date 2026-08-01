@@ -655,6 +655,11 @@ function main() {
     { path: join(srcRoot, 'actors'), checkThree: true, checkGlobals: true, exclude: [archetypesDir] },
     { path: archetypesDir, checkThree: false, checkGlobals: true },
     { path: join(srcRoot, 'ai'), checkThree: true, checkGlobals: true },
+    // SAVE-1 (O-12 grant: "add src/save/ as a scanned root, nothing else").
+    // `src/save/` must stay fully headless (no `three`, no `document`/
+    // `window`, no `performance.now()`) — full sweep, same rule as
+    // `combat`/`items`/`skills`/`nav`/`world`/`actors`/`ai` above.
+    { path: join(srcRoot, 'save'), checkThree: true, checkGlobals: true },
   ];
 
   // "every data/ directory" — auto-discovered, deduped against the explicit

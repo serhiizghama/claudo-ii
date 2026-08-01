@@ -15,6 +15,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { UiSystem } from '../../src/ui/index.js';
 import { LAYER_NAMES, STYLE_ID, TOKENS_CSS, injectStyle, removeStyle } from '../../src/ui/style.js';
@@ -22,16 +24,50 @@ import { el, setText, setStyle, setClass, place, countNodes, clamp, lerp, damp, 
 import { EN, RU, pluralRule, format, missingRuKeys } from '../../src/ui/i18n.js';
 import { boot } from '../../src/main.js';
 
+const API_CONTRACTS_SRC = readFileSync(fileURLToPath(new URL('../../docs/spec/02-api-contracts.md', import.meta.url)), 'utf8');
+
+/** Extracts `UiSystem`'s own `static deps = [...]` array literally from
+ * `02-api-contracts.md` §14's contract block (`export class UiSystem {
+ * static id = 'ui'; static deps = [...]; }`), so the assertion below tracks
+ * whatever the contract says today rather than a copy-pasted snapshot of it. */
+function contractDeps() {
+  const m = API_CONTRACTS_SRC.match(/class UiSystem \{[^}]*static deps = (\[[^\]]*\])/);
+  assert.ok(m, "could not find UiSystem's static deps in 02-api-contracts.md §14 — has the contract block moved/changed shape?");
+  return JSON.parse(m[1].replace(/'/g, '"'));
+}
+
 // ---------------------------------------------------------------------------
 // Subsystem interface
 // ---------------------------------------------------------------------------
 
-test('UiSystem: static id/deps match the subsystem interface', () => {
+// This test used to assert `assert.deepEqual(UiSystem.deps, ['player'])` —
+// O-27/O-39's tenth recorded instance: a literal snapshot of "what's
+// registered so far", true only because `items` (ITEM-1) and `player`
+// (PLYR-1/2) hadn't both landed yet, and — like every earlier instance —
+// it went stale (red) the moment UI-3/O-61 restored the real dependency.
+// `deps` is initialisation order, not an import (ARCHITECTURE.md rule 2);
+// what this test exists to protect is that `ui` initialises after every
+// subsystem it actually reads from — a claim that can be checked against
+// the contract itself, not by re-typing whatever the array happens to
+// contain at the time the test is written. Two independent assertions:
+// (1) the invariant this test is actually named for (`items`/`player` are
+// both present, order-independent, so a reordering or an unrelated
+// addition to `static deps` for a THIRD id doesn't fail it), and (2) that
+// the code's `deps` set matches `02-api-contracts.md` §14's own declared
+// set exactly — so a future milestone that adds e.g. `skills` to the
+// contract makes this fail loudly only if the code doesn't follow, never
+// merely because the list grew.
+test('UiSystem: static id/deps match the subsystem interface, and deps tracks 02-api-contracts.md §14 (not a snapshot of it)', () => {
   assert.equal(UiSystem.id, 'ui');
   assert.ok(Array.isArray(UiSystem.deps));
-  // 'items' omitted — not registered yet (see src/ui/index.js's header,
-  // the same precedent src/actors/index.js set for 'materials').
-  assert.deepEqual(UiSystem.deps, ['player']);
+
+  assert.ok(UiSystem.deps.includes('items'), "'ui' must initialise after 'items' (O-61 — the hotbar's belt sweep reads items.beltCooldown)");
+  assert.ok(UiSystem.deps.includes('player'), "'ui' must initialise after 'player' (D-A: player.hudState() is ui's one path to persistent values)");
+
+  const expected = contractDeps();
+  assert.deepEqual([...UiSystem.deps].sort(), [...expected].sort(),
+    `UiSystem.deps ${JSON.stringify(UiSystem.deps)} must match 02-api-contracts.md §14's declared deps ${JSON.stringify(expected)} exactly (as a set) — ` +
+    'if this fails, either the code or the contract changed without the other, not because the list merely grew');
 });
 
 test('UiSystem: does not implement fixedUpdate (rule 5 / this ticket\'s brief)', () => {
@@ -43,10 +79,21 @@ test('UiSystem: does not implement fixedUpdate (rule 5 / this ticket\'s brief)',
 // U0 acceptance criterion — 09 §15's own wording
 // ---------------------------------------------------------------------------
 
-test('init(): builds #ui with exactly 9 nodes (root + 8 layers, 09 §13.1)', async () => {
+// UI-2 (09 §15 U1) landed after this suite was written and now draws real
+// content into the `hud` layer (the plinth, orbs and XP bar) — O-27's
+// seventh appearance: a test written before a subsystem existed must not be
+// read as "nothing else will ever exist" (this ticket's own rule 12). The
+// two tests below no longer assert an exact node count or "nothing draws
+// yet"; they assert what was actually worth protecting — the root + 8 named
+// layers exist, and the total stays inside 09 §13.1's real hard cap (700
+// nodes under `#ui`, not the "9" row of its budget table, which is only
+// "root + 8 layers").
+
+test('init(): builds #ui with the root + 8 layers, staying inside the 09 §13.1 700-node budget', async () => {
   const sys = new UiSystem();
   await sys.init({});
-  assert.equal(sys.__nodeCount(), 9, 'root + 8 layers must be exactly 9 (09 §13.1\'s hard-cap table)');
+  assert.ok(sys.__nodeCount() >= 9, 'at least the root + 8 (empty) layers must exist (09 §13.1)');
+  assert.ok(sys.__nodeCount() <= 700, "09 §13.1's hard cap: 700 nodes under #ui");
   sys.dispose();
 });
 
@@ -59,9 +106,19 @@ test('init(): the root element is #ui, class cl2-ui, with exactly 8 child layers
   assert.equal(root.children.length, LAYER_NAMES.length);
   const seen = root.children.map((c) => c.getAttribute('data-cl2-layer'));
   assert.deepEqual(seen, LAYER_NAMES);
-  for (const layer of root.children) {
-    assert.equal(layer.children.length, 0, 'no layer may have any content yet — 09 §15 U0: nothing draws yet');
-  }
+
+  // Only the `hud` layer's content is asserted here — U1 (this file's own
+  // ticket) is the one thing this suite can promise. This assertion used
+  // to also require "every OTHER layer is empty", which repeated O-27 one
+  // layer later: it went red the moment UI-4 (09 §15 U3) attached its
+  // damage-number canvas/vignette into `feedback`. This file does not own
+  // `panels`/`tooltip`/`feedback`/etc. — whichever ticket lands each of
+  // those populates it, and this assertion must not freeze any of them
+  // empty. The real budget (09 §13.1's 700-node hard cap) is a ceiling,
+  // asserted by the test just above this one.
+  const hudLayer = root.children.find((c) => c.getAttribute('data-cl2-layer') === 'hud');
+  assert.ok(hudLayer.children.length > 0, 'the hud layer must carry U1\'s plinth/orbs/XP bar');
+
   sys.dispose();
 });
 
@@ -121,7 +178,9 @@ test('setScreen(): records state without adding/removing any DOM node (09 §15 U
 test('dispose(): removes every node this subsystem created', async () => {
   const sys = new UiSystem();
   await sys.init({});
-  assert.equal(sys.__nodeCount(), 9);
+  const before = sys.__nodeCount();
+  assert.ok(before >= 9, 'at least the root + 8 layers must exist before dispose');
+  assert.ok(before <= 700, "09 §13.1's hard cap: 700 nodes under #ui");
   sys.dispose();
   assert.equal(sys.__nodeCount(), 0);
 });
@@ -139,11 +198,12 @@ function makeCanvas(width = 1280, height = 720) {
   };
 }
 
-test('boot(): registers ui; ctx.get(\'ui\') exposes a working UiSystem with node count 9', async () => {
+test('boot(): registers ui; ctx.get(\'ui\') exposes a working UiSystem inside the 09 §13.1 node budget', async () => {
   const { ctx, bootLog } = await boot({ canvas: makeCanvas(), deterministic: true, global: {} });
   const ui = ctx.get('ui');
   assert.ok(ui instanceof UiSystem);
-  assert.equal(ui.__nodeCount(), 9);
+  assert.ok(ui.__nodeCount() >= 9, 'at least the root + 8 layers must exist');
+  assert.ok(ui.__nodeCount() <= 700, "09 §13.1's hard cap: 700 nodes under #ui");
   assert.equal(ui.t('hud.life'), 'Life');
 
   // B7 (boot veil) and B12 (menu) now resolve 'done', not 'skipped', now

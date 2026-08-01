@@ -114,6 +114,7 @@ import {
   endActorWrite,
 } from './motion.js';
 import { spawnBoneRanker } from './archetypes/bone_ranker.js';
+import { stats as statsPure, markDirty as markDirtyPure, setSourceLayer as setSourceLayerPure } from './stats.js';
 
 // ---------------------------------------------------------------------------
 // ACTR-6 — dev-only archetype-visual escape hatch (see `__archetypeVisuals`
@@ -208,6 +209,10 @@ export class ActorsSystem {
      * reassigned" discipline as `_moveResult`, so `teleport` stays
      * `Alloc: no` regardless of whether `nav` is present. */
     this._navSnapScratch = { x: 0, y: 0, z: 0 };
+    /** `markDirty`'s reused `stats:dirty` payload — mutated in place and
+     * emitted synchronously, never stashed (same discipline as
+     * `combat/packet.js`'s `_deathPayload`); keeps `markDirty` alloc-free. */
+    this._statsDirtyPayload = { actor: null };
     /** Kept only for `teleport`'s `ctx.peek('nav')` lookup at call time —
      * ACTR-1 never needed to hold `ctx` past `init()`; `nav` is ticket #7/#11
      * of this milestone (this is #4) and may not be registered at all yet,
@@ -422,6 +427,36 @@ export class ActorsSystem {
     this._pool.forEachInRadius(x, z, radius, team, fn);
   }
 
+  // ─── Stats and vessels (02-api-contracts.md §7) ────────────────────────
+  // ACTR-15/O-57: only these three rows. The rest of this section
+  // (addLife, spend, lifeFraction, ...) is a later ticket's — not stubbed.
+
+  /** `02-api-contracts.md` §7: `stats(actor) => StatBlock` — recomposes if
+   * dirty, then returns; same reference every call on a clean actor. */
+  stats(actor) {
+    return statsPure(actor);
+  }
+
+  /** `02-api-contracts.md` §7: `markDirty(actor) => void` — sets the flag
+   * and emits `stats:dirty` exactly once. `setSourceLayer` below does NOT
+   * also emit: markDirty's row is the only one whose doc text says
+   * "emits", and `ARCHITECTURE.md`'s event table plus the already-landed
+   * `src/combat/status.js#rebuildStatusLayer` (calls `setSourceLayer` then
+   * emits itself) both put that emission on the *caller* of
+   * `setSourceLayer`, not on `actors` — see this ticket's report. */
+  markDirty(actor) {
+    markDirtyPure(actor);
+    this._statsDirtyPayload.actor = actor;
+    this._ctx.events.emit('stats:dirty', this._statsDirtyPayload);
+  }
+
+  /** `02-api-contracts.md` §7: `setSourceLayer(actor, layer, partial) =>
+   * void`. Pure forward only — see `markDirty` above for why this does not
+   * also emit `stats:dirty`. */
+  setSourceLayer(actor, layer, partial) {
+    setSourceLayerPure(actor, layer, partial);
+  }
+
   dispose() {
     if (this._pool) this._pool.dispose();
     this._pool = null;
@@ -429,6 +464,7 @@ export class ActorsSystem {
     this._bodyId = null;
     this._moveResult = null;
     this._navSnapScratch = null;
+    this._statsDirtyPayload = null;
     this._ctx = null;
   }
 }

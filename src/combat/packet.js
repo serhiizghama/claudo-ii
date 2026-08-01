@@ -304,14 +304,39 @@ export function attributeBonusFor(handling, strength, dexterity) {
   }
 }
 
-/** See the file header, gap 2. `source.equipment.mainHand` when present,
- * else `WEAPONS.unarmed`.
+/** See the file header, gap 2 — amended by ITEM-11/D-21 now that `items`
+ * exists. `source.equipment.mainHand` when present, else `WEAPONS.unarmed`.
+ *
+ * `actor.equipment.mainHand` carries the literal `ItemInstance | null` of
+ * `01-data-model.md` §5.4, not a flat weapon profile: an `ItemInstance` has
+ * `rolls.damageMin`/`damageMax` (different names) and no `attackTime`/
+ * `handling` at all — those live on `ItemBase`, reachable only through
+ * `baseId`, which only `items` may resolve (`ARCHITECTURE.md` rule 2 forbids
+ * `combat` doing that lookup itself). `items.equip()`/`unequip()` (the only
+ * write paths for `mainHand`) maintain a derived `_cache.weapon = {
+ * minDamage, maxDamage, attackTime, handling }` on the item for exactly this
+ * read — `01` §5's own "cached, never serialised, rebuilt on load" `_cache`
+ * contract. Discriminated on `'baseId' in mainHand`: a real `ItemInstance`
+ * always carries `baseId` (`01` §5.3); `data/weapons.js`'s own fixture rows
+ * (used directly by tests/fixtures that set `actor.equipment.mainHand =
+ * WEAPONS.axe_battle_normal` verbatim, and by any monster/no-`items`-yet
+ * caller) carry `id`, never `baseId`, and are returned as-is unchanged. A
+ * real item with no `_cache.weapon` yet built (not equipped through
+ * `items.equip()` — e.g. a save loaded before `rebuildCache` learns to
+ * populate it, ITEM-13, not yet built) falls back to `WEAPONS.unarmed`
+ * rather than reading `undefined` fields — this is O-55's now-half-open
+ * "stale cache reads as unarmed" edge case, carried forward for the
+ * `ai`/monster side per this ticket's report.
  * @param {object} source an Actor record.
  * @returns {object} a weapon-shaped object (`data/weapons.js`'s shape).
  */
 export function resolveWeapon(source) {
   const mainHand = source && source.equipment && source.equipment.mainHand;
-  return mainHand || WEAPONS.unarmed;
+  if (!mainHand) return WEAPONS.unarmed;
+  if (mainHand.baseId !== undefined) {
+    return (mainHand._cache && mainHand._cache.weapon) || WEAPONS.unarmed;
+  }
+  return mainHand;
 }
 
 /** See the file header, gap 3. `CLASS_SCALE_TABLE[classId]`, else the

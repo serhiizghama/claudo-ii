@@ -198,6 +198,168 @@ export const TOKENS_CSS = `
   pointer-events: none;
 }
 ${LAYER_NAMES.map((name, i) => `.cl2-layer[data-cl2-layer="${name}"] { z-index: ${i + 1}; }`).join('\n')}
+
+/* ---------------------------------------------------------------------
+ * UI-5 — the item tooltip (09 §5). Structural rules only; every colour
+ * that varies per item (rarity, danger, property) is a small fixed class
+ * below, toggled from JS with \`setClass\` (./util.js) rather than an
+ * inline style string, so a redraw never allocates a colour literal.
+ * \`09 §13.4\` rule 3: only \`transform\`/\`opacity\` animate here — position
+ * is written via \`place()\`'s \`translate3d\`, fade via \`opacity\`, nothing
+ * else is written per frame.
+ * --------------------------------------------------------------------- */
+.cl2-tooltip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  display: none;
+  pointer-events: none;
+  overflow: hidden;
+  padding: var(--space-3);
+  background: var(--e3-fill);
+  border: var(--edge);
+  box-shadow: var(--e3-shadow);
+  font-family: var(--ff-sans);
+  color: var(--ink-2);
+}
+.cl2-tt-seam {
+  position: absolute;
+  left: 0;
+  top: 6%;
+  bottom: 6%;
+  width: 2px;
+  background: var(--ember);
+}
+.cl2-tt-row {
+  display: flex;
+  align-items: baseline;
+  /* UI-7 — was justify-content: space-between for the original
+     label/value pair. A row now has a THIRD child (.cl2-tt-chip, always
+     present, see tooltip.js#makeRow) — space-between across three flex
+     children would put it in the middle, not at the end. .cl2-tt-value's
+     own margin-left: auto below now does the "push everything from here
+     rightward" job instead, so value and (when shown) its trailing chip
+     stay packed together at the row's right edge, exactly space-between's
+     old two-child result. */
+  justify-content: flex-start;
+  gap: var(--space-2);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-lh);
+  letter-spacing: var(--t-body-tracking);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.cl2-tt-row.cl2-tt-center { justify-content: center; }
+.cl2-tt-label { color: var(--ink-3); }
+.cl2-tt-value { color: var(--ink-1); margin-left: auto; }
+.cl2-tt-range {
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  padding-left: var(--space-2);
+}
+.cl2-tt-name {
+  font-family: var(--ff-serif);
+  font-size: var(--t-name-size);
+  font-weight: var(--t-name-weight);
+  line-height: var(--t-name-lh);
+  letter-spacing: var(--t-name-tracking);
+  text-align: center;
+}
+.cl2-tt-basetype {
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-lh);
+  text-align: center;
+  opacity: .78;
+}
+.cl2-tt-micro {
+  font-size: var(--t-micro-size);
+  font-weight: var(--t-micro-weight);
+  line-height: var(--t-micro-lh);
+  letter-spacing: var(--t-micro-tracking);
+  text-transform: var(--t-micro-transform);
+}
+.cl2-tt-micro.cl2-tt-center { text-align: center; }
+.cl2-tt-micro.cl2-tt-right { text-align: right; }
+.cl2-tt-rule { height: 1px; background: var(--hair); }
+.cl2-tt-lore {
+  font-family: var(--ff-serif);
+  font-style: italic;
+  font-size: var(--t-read-size);
+  line-height: var(--t-read-lh);
+  color: var(--ink-3);
+  white-space: normal;
+}
+.cl2-tt-notice {
+  font-style: italic;
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-lh);
+  color: #d99b2b;
+  text-align: center;
+  white-space: normal;
+}
+
+/* Per-line colour classes — toggled, never inline-stringed (09 §13.3's
+ * cached \`setClass\` rule). */
+.cl2-tt-c-normal { color: var(--rarity-normal); }
+.cl2-tt-c-superior { color: var(--rarity-superior); }
+.cl2-tt-c-magic { color: var(--rarity-magic); }
+.cl2-tt-c-rare { color: var(--rarity-rare); }
+.cl2-tt-c-unique { color: var(--rarity-unique); }
+.cl2-tt-c-danger { color: var(--danger-ink); }
+.cl2-tt-c-property { color: var(--property); }
+.cl2-tt-c-ink1 { color: var(--ink-1); }
+.cl2-tt-c-ink2 { color: var(--ink-2); }
+.cl2-tt-c-ink3 { color: var(--ink-3); }
+.cl2-tt-c-ink4 { color: var(--ink-4); }
+.cl2-tt-c-unidentified { color: #d99b2b; }
+
+.cl2-tt-seam-normal { background: var(--rarity-normal); }
+.cl2-tt-seam-superior { background: var(--rarity-superior); }
+.cl2-tt-seam-magic { background: var(--rarity-magic); }
+.cl2-tt-seam-rare { background: var(--rarity-rare); }
+.cl2-tt-seam-unique { background: var(--rarity-unique); }
+.cl2-tt-seam-danger { background: var(--danger); }
+
+/* ---------------------------------------------------------------------
+ * UI-7 — comparison mode (09 §5.6). .cl2-tt-compare needs no opacity/
+ * elevation rule of its own: Tooltip#_applyComparePanelsVisibility
+ * writes its 0.86-ceiling opacity inline (the same integrated-fade
+ * mechanism the primary tooltip already uses, D-D — never a CSS value
+ * here). .cl2-tt-seam-compare is the "--ink-4 seam instead of the
+ * rarity seam" §5.6.2 asks for. .cl2-tt-chip is the delta-chip span
+ * every row now carries (§5.6's "right-aligned chip") — see
+ * .cl2-tt-value's own margin-left: auto (its rule, above) for how it
+ * and its trailing chip both end up flush against the row's right edge,
+ * packed together.
+ * --------------------------------------------------------------------- */
+.cl2-tt-seam-compare { background: var(--ink-4); }
+.cl2-tt-chip {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  color: var(--ink-4);
+  white-space: nowrap;
+}
+.cl2-tt-chip-good { color: var(--good-ink); }
+.cl2-tt-chip-danger { color: var(--danger-ink); }
+
+/* ---------------------------------------------------------------------
+ * UI-6 — the inventory grid background (09 §6.1, verbatim). "The grid
+ * background is one DOM node" — two repeating-linear-gradient layers draw
+ * the 44px lattice and the well shading; \`./inventory.js\` never creates a
+ * per-cell node. Positioning/sizing is set from JS (\`setStyle\`, computed
+ * geometry, D-B) — only the paint itself lives here.
+ * --------------------------------------------------------------------- */
+.cl2-inv-grid {
+  position: absolute;
+  box-sizing: border-box;
+  background-image:
+    repeating-linear-gradient(to right,  var(--hair) 0 1px, transparent 1px 44px),
+    repeating-linear-gradient(to bottom, var(--hair) 0 1px, transparent 1px 44px),
+    linear-gradient(rgba(10, 9, 8, .55), rgba(10, 9, 8, .55));
+  box-shadow: var(--well);
+}
 `;
 
 /**

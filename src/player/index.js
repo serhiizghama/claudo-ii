@@ -152,6 +152,79 @@
 // `tests/player/plyr1.test.js`) never triggers it even when `init()` runs
 // against a Node ctx.
 
+// ---------------------------------------------------------------------------
+// PLYR-10 addendum — `hudState(out)`, round 2: O-57 is closed (ACTR-15)
+// ---------------------------------------------------------------------------
+// docs/PROGRESS.md D-23: `player.hudState()` had a contract row
+// (`02-api-contracts.md:1189`, the `HudState` literal at `:1199-1213`) but no
+// ticket owned writing it — `09-ui.md` §D-A is explicit that this is the
+// *only* legal path a persistent value reaches the HUD. `hudState(out)`
+// below fills it.
+//
+// **Round 1 hit O-57 and correctly stopped** (docs/PROGRESS.md D-29):
+// `maxLife`/`maxMana`/`secondary`/`maxSecondary`/`secondaryKind` all need the
+// COMPOSED `StatBlock`, and `src/actors/index.js` (`ActorsSystem`) exposed no
+// accessor for it — `ARCHITECTURE.md` hard rule 2 forbids importing
+// `src/actors/stats.js`/`vessels.js` directly to work around that, so round 1
+// left those fields at the literal's defaults rather than reach around the
+// gap. **ACTR-15 (accepted, docs/PROGRESS.md D-29) closes it**:
+// `ctx.get('actors').stats(actor)` now recomposes-if-dirty and returns the
+// real `StatBlock` — `maxLife`/`maxMana`/`maxRage`/`maxResonance` all live on
+// it (`src/actors/stats.js` FIELD_NAMES, composed per-class by its
+// `CLASS_TABLE`, `01-data-model.md` §4.2 steps 2+8).
+//
+// `maxLife`/`maxMana` are read straight off the returned `StatBlock`. The
+// live secondary VALUE (as opposed to its cap) is NOT on the `StatBlock` at
+// all — `actor.rage`/`actor.resonance` are plain fields on the Actor record,
+// the same tier as `life`/`mana` (`src/actors/vessels.js`'s own
+// `KNOWN_RESOURCES` list, ACTR-8, already merged in M2) — so once it is known
+// WHICH of the two applies to this actor, that value is read directly, no
+// accessor needed, exactly like `life`/`mana` above.
+//
+// `secondaryKind` — round 1 correctly refused to duplicate `stats.js`'s
+// `CLASS_TABLE` (`classId -> {rage|resonance|mana}`) here (rule 9: gameplay
+// numbers live in data, owned by their subsystem; risking the O-51/O-48
+// drift class). It turns out no duplication is needed: the composed
+// `StatBlock` already encodes the answer PER ACTOR — `01-data-model.md` §2.1
+// "secondary resource" base contributions (`maxRage`/`maxResonance`, via
+// `CLASS_TABLE`'s `baseRage`/`baseResonance`) mean exactly one of
+// `stats.maxRage`/`stats.maxResonance` is nonzero for a class that has a
+// secondary resource at all (`01-data-model.md` §2: "Ravager -> rage,
+// Emberwright -> none, Runeblade -> resonance"). So `secondaryKind` (and
+// which actor field to read for `secondary`/`maxSecondary`) is DERIVED from
+// which of those two is nonzero — never a second copy of the table. A class
+// with neither (Emberwright) falls to `'mana'`: `09-ui.md` §4.1.2 draws that
+// class's resource orb straight off `mana`/`maxMana`, not `secondary` at all,
+// so `secondary`/`maxSecondary` stay at 0 in that case — correct, not a
+// missing accessor.
+//
+// `secondaryDecay` is the one field STILL left at its contract default
+// (`0`), and NOT because of O-57 — that gap is closed. `09-ui.md` §16.4 says
+// plainly the rage orb's decay arrow is *gated* by `inCombat`, and this
+// ticket's own brief explicitly keeps `inCombat` at the literal's default
+// (below) because computing it needs combat's in-combat-window formula,
+// which nothing wires into `player` yet. The actual decay RATE
+// (`RAGE_DECAY_PER_SECOND`/`RESONANCE_DECAY_PER_SECOND`) is private data
+// inside `src/actors/vessels.js`, not exposed by `ActorsSystem` the way
+// `stats()` now is — importing that module directly would be the same rule-2
+// violation round 1 refused, and re-typing the numbers here would be the
+// same rule-9 drift risk `secondaryKind` above avoided. So `secondaryDecay`
+// stays at its literal default until either `inCombat` gets a real owner or
+// `actors` exposes the decay rate the same way `stats()` now exposes the
+// `StatBlock`. See this ticket's report.
+//
+// Every other field either has an explicit contract default per this
+// ticket's brief (`hotbar`/`cooldowns`/`xp`/`xpFloor`/`xpCeiling`/`xpTotal`/
+// `statPoints`/`skillPoints`/`gold`/`questStep`/`belt` — owned by systems
+// landing M4/M6) or has no owning feature wired into `player` yet
+// (`level`/`targetId`/`difficulty`/`zoneId`/`name`/`classId`/`inCombat` —
+// none of these were named in the brief's "must be true" list, and each
+// needs something this ticket does not own: target selection, the
+// `difficulty` property's own M6 ticket, zone tracking, or duplicating
+// combat's in-combat window formula) — all left at the literal's own
+// defaults, per O-27 (a default is honestly documented as today's contract
+// value, never asserted as a permanent fact).
+
 // PLYR-2: the real path-following state machine. Same directory, not a
 // cross-subsystem import (hard rule 2 only forbids reaching into another
 // subsystem's own module) — see move.js's own header.
@@ -227,6 +300,30 @@ function createIntent() {
     interactId: 0,
     stopRequested: false,
     sequence: 0,
+  };
+}
+
+/**
+ * `02-api-contracts.md:1199-1213`'s `HudState` literal, verbatim defaults —
+ * PLYR-10's own scratch (built once, reused by `hudState()`'s no-`out` form,
+ * mirroring `createIntent()` above). `cooldowns`/`hotbar`/`belt` are the
+ * fixed-length arrays the literal itself shows; allocated exactly once here
+ * and never replaced (ARCHITECTURE.md rule 6 — `array.length = 0` or a
+ * fresh `[...]` would tear/reallocate the backing store on every call).
+ * @returns {object}
+ */
+function createHudState() {
+  return {
+    life: 0, maxLife: 0, mana: 0, maxMana: 0,
+    secondary: 0, maxSecondary: 0, secondaryKind: 'rage',
+    secondaryDecay: 0,
+    level: 1, xp: 0, xpFloor: 0, xpCeiling: 50, xpTotal: 0,
+    statPoints: 0, skillPoints: 0, gold: 0,
+    cooldowns: [0, 0, 0, 0], hotbar: [null, null, null, null],
+    belt: [0, 0, 0, 0], targetId: 0, difficulty: 'instruction',
+    zoneId: 'last_bastion', questStep: 0,
+    name: '', classId: 'ravager',
+    inCombat: false,
   };
 }
 
@@ -379,6 +476,12 @@ export class PlayerSystem {
      * `null` outside a real browser session (Node tests, SSR-style
      * boot()s). */
     this._debugView = null;
+
+    /** PLYR-10: `hudState()`'s no-`out` scratch — built once, written into
+     * every call, never reassigned (same discipline as `_cursorScratch`
+     * above). See the file header's "PLYR-10 addendum" for which fields
+     * this actually tracks the live actor for today. */
+    this._hudScratch = createHudState();
   }
 
   async init(ctx) {
@@ -504,6 +607,110 @@ export class PlayerSystem {
     dst.x = this._cursor.x;
     dst.y = this._cursor.y;
     dst.z = this._cursor.z;
+    return dst;
+  }
+
+  /**
+   * `02-api-contracts.md:1189` — `hudState(out?) => HudState`: "everything
+   * `ui` needs, in one object". `Fixed: N` — `ui` calls this once per
+   * `lateUpdate` (`09-ui.md` §D-A); never call it from `fixedUpdate`.
+   * `Alloc: no` on the hot (supplied-`out`) path — writes fields in place,
+   * writes the fixed-length arrays' elements in place, never allocates.
+   * Falls back to the reused `_hudScratch` when called with no argument.
+   *
+   * See the file header's "PLYR-10 addendum" for exactly which fields track
+   * the live actor/`StatBlock` today (O-57 closed by ACTR-15) and which are
+   * still blocked (`secondaryDecay`) or simply have no owning feature wired
+   * into `player` yet (left at the `HudState` literal's own contract
+   * defaults, per O-27 — a default, not an assertion that nothing else will
+   * ever exist).
+   * @param {object} [out]
+   * @returns {object}
+   */
+  hudState(out) {
+    const dst = out || this._hudScratch;
+    const actor = this._actor;
+
+    // Real today — plain fields on the Actor record, no accessor needed
+    // (01-data-model.md §2 / src/actors/vessels.js).
+    dst.life = actor ? actor.life : 0;
+    dst.mana = actor ? actor.mana : 0;
+
+    if (actor) {
+      // O-57 closed (ACTR-15, docs/PROGRESS.md D-29): `actors.stats(actor)`
+      // recomposes if dirty, then returns the same `StatBlock` reference on
+      // a clean actor (Alloc: no) — see the file header's "PLYR-10
+      // addendum" for the full reasoning below.
+      const s = this._actors.stats(actor);
+      dst.maxLife = s.maxLife;
+      dst.maxMana = s.maxMana;
+
+      if (s.maxRage > 0) {
+        // Ravager. `actor.rage` is a plain Actor-record field (ACTR-8),
+        // same tier as `life`/`mana` above.
+        dst.secondaryKind = 'rage';
+        dst.secondary = actor.rage;
+        dst.maxSecondary = s.maxRage;
+      } else if (s.maxResonance > 0) {
+        // Runeblade.
+        dst.secondaryKind = 'resonance';
+        dst.secondary = actor.resonance;
+        dst.maxSecondary = s.maxResonance;
+      } else {
+        // Emberwright (01-data-model.md §2: "Emberwright -> none") — the
+        // resource orb reads mana/maxMana directly for this class
+        // (09-ui.md §4.1.2), so secondary/maxSecondary have nothing to hold.
+        dst.secondaryKind = 'mana';
+        dst.secondary = 0;
+        dst.maxSecondary = 0;
+      }
+    } else {
+      dst.maxLife = 0;
+      dst.maxMana = 0;
+      dst.secondary = 0;
+      dst.maxSecondary = 0;
+      dst.secondaryKind = 'rage';
+    }
+
+    // Still blocked — not on O-57 (closed), but on `inCombat` (below, left
+    // at its own default per this ticket's brief) and on the decay-rate
+    // constants living privately in src/actors/vessels.js. See the file
+    // header's "PLYR-10 addendum".
+    dst.secondaryDecay = 0;
+
+    // Owned by systems landing M4/M6 (this ticket's brief, point 5) —
+    // contract literal defaults, verbatim.
+    dst.xp = 0;
+    dst.xpFloor = 0;
+    dst.xpCeiling = 50;
+    dst.xpTotal = 0;
+    dst.statPoints = 0;
+    dst.skillPoints = 0;
+    dst.gold = 0;
+    dst.questStep = 0;
+    dst.cooldowns[0] = 0;
+    dst.cooldowns[1] = 0;
+    dst.cooldowns[2] = 0;
+    dst.cooldowns[3] = 0;
+    dst.hotbar[0] = null;
+    dst.hotbar[1] = null;
+    dst.hotbar[2] = null;
+    dst.hotbar[3] = null;
+    dst.belt[0] = 0;
+    dst.belt[1] = 0;
+    dst.belt[2] = 0;
+    dst.belt[3] = 0;
+
+    // No owning feature wired into `player` yet — contract literal
+    // defaults. See the file header's "PLYR-10 addendum".
+    dst.level = 1;
+    dst.targetId = 0;
+    dst.difficulty = 'instruction';
+    dst.zoneId = 'last_bastion';
+    dst.name = '';
+    dst.classId = 'ravager';
+    dst.inCombat = false;
+
     return dst;
   }
 

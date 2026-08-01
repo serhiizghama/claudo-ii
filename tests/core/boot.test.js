@@ -92,7 +92,7 @@ test('bootLog: stages appear in order B1..B13; each of B7/B10/B11/B12 is done if
   }
 });
 
-test('bootLog: B10/B11 complete once fx/save are registered; B7/B12 already reflect the real, always-registered ui subsystem', async () => {
+test('bootLog: B10/B11 complete once fx/save are registered; B7/B11/B12 already reflect the real, always-registered ui/save subsystems', async () => {
   const calls = [];
   class Fx {
     static id = 'fx';
@@ -101,25 +101,21 @@ test('bootLog: B10/B11 complete once fx/save are registered; B7/B12 already refl
       calls.push(['fx.prewarmMaterials']);
     }
   }
-  class Save {
-    static id = 'save';
-    static deps = [];
-    meta() {
-      return { slots: [null, null, null] }; // no character yet
-    }
-    settings() {
-      calls.push(['save.settings']);
-    }
-  }
 
-  // No stub 'ui' here — `src/main.js` (UI-1) now registers a real one
-  // unconditionally, so `Registry.add` would throw on the id collision (see
-  // this test's own git history: that is exactly the failure landing `ui`
-  // produced). This assumption is asserted explicitly below, so a future
-  // change that makes `ui` no longer always-registered fails loudly here
-  // instead of a confusing collision three lines down.
-  const { bootLog, ctx } = await boot(bootOpts({ systems: [Fx, Save] }));
+  // No stub 'ui' AND no stub 'save' here — `src/main.js` registers real
+  // ones unconditionally (`ui` since UI-1, `save` since SAVE-1), so
+  // `Registry.add` would throw on the id collision for either (see this
+  // test's own git history: that is exactly the failure landing `ui` first
+  // produced, and landing `save` reproduced one subsystem id over — the
+  // fix, both times, is to stop asserting a state — "this id is not yet
+  // registered" — that stopped being true, not to keep injecting a stub
+  // that now collides). These assumptions are asserted explicitly below,
+  // so a future change that makes either no longer always-registered fails
+  // loudly here instead of a confusing collision three lines down. Only
+  // `fx` (still unbuilt, M8) is stubbed.
+  const { bootLog, ctx } = await boot(bootOpts({ systems: [Fx] }));
   assert.ok(ctx.has('ui'), "this test assumes src/main.js always registers a real 'ui' subsystem");
+  assert.ok(ctx.has('save'), "this test assumes src/main.js always registers a real 'save' subsystem");
 
   for (const id of ['B7', 'B10', 'B11', 'B12']) {
     const entry = bootLog.find((e) => e.id === id);
@@ -127,14 +123,15 @@ test('bootLog: B10/B11 complete once fx/save are registered; B7/B12 already refl
   }
 
   // B12 lands on character_create because every slot is null
-  // (01-data-model.md §10.2) — the real ui's own setScreen() call, recorded
-  // as bootLog data rather than observed through an injected stub.
+  // (01-data-model.md §10.2) — the real save's own meta() (no character has
+  // ever been persisted; SAVE-2/localStorage is M6) feeding the real ui's
+  // own setScreen() call, recorded as bootLog data rather than observed
+  // through an injected stub.
   assert.equal(bootLog.find((e) => e.id === 'B12').screen, 'character_create');
 
   // fx's own prewarmMaterials is never called from here — B10 is fx's own
   // responsibility (11-flows.md B10) and it's also excluded from
   // core/prewarm.js's B8 dispatch by design.
-  assert.ok(calls.some((c) => c[0] === 'save.settings'));
   assert.ok(!calls.some((c) => c[0] === 'fx.prewarmMaterials'));
 });
 

@@ -135,9 +135,29 @@ export const SHOTS = {
   // came back identical to `boot_clean`'s. One extra `engine.frame(FIXED_DT)`
   // after this `setup` forces the one render pass that actually reflects the
   // emptied scene before the canvas is read.
+  //
+  // UI-2 addendum — `ctx.get('ui').setScreen('game')`: UI-2 (`09 §15` U1)
+  // taught the HUD to gate itself on the active screen (`09-ui.md:2128`'s
+  // vignette-gating principle, generalised — see `src/ui/hud.js#setVisible`
+  // and `src/ui/index.js#setScreen`), because a boot-time regression showed
+  // the plinth drawing over `character_create` (the real post-boot screen,
+  // `src/main.js`'s B12). `boot_clean` — `setup: null`, `ui` never even
+  // constructed on that path — is unaffected. But left alone here, this
+  // shot would go back to matching `12-testing.md` §9.1's letter ("no world
+  // behind it") while silently failing its own purpose: `ui_clean` exists
+  // to guard the overlay, and a HUD hidden by the very screen this shot
+  // boots into is not a guard, it's a blind spot. One more line puts `ui`
+  // on the screen where the HUD is supposed to be visible, so the shot
+  // actually exercises what U1 built. `ctx.get('ui')` reads through the
+  // live, already-constructed object graph exactly the way `actor_ranker`'s
+  // own `setup` reads `ctx.get('actors')` below — no import, no closure
+  // over anything outside this function's own `(engine, ctx)` parameters
+  // (this file's header, "must survive toString()+eval"). `setVisible`
+  // writes a `display` style synchronously, so the one extra `frame()`
+  // this shot already runs is enough to paint it — no `steps` bump needed.
   ui_clean: {
     id: 'ui_clean',
-    description: "the UI overlay with no world behind it (12-testing.md §9.1) — the empty #ui skeleton (09 §15 U0) over a scene cleared of debugview.js's placeholder ground/capsule",
+    description: "the UI overlay on the game screen (12-testing.md §9.1's \"the overlay with no world behind it\") — U1's plinth/orbs/XP bar, over a scene cleared of debugview.js's placeholder ground/capsule",
     milestone: 'M2',
     steps: 1,
     // Zero free variables — see this file's header, "pumpShot — AND a
@@ -146,6 +166,7 @@ export const SHOTS = {
     setup: (engine, ctx) => {
       const children = ctx.scene.children.slice();
       for (let i = 0; i < children.length; i++) ctx.scene.remove(children[i]);
+      ctx.get('ui').setScreen('game');
     },
   },
   // ACTR-6 — dev-only, NOT one of 12-testing.md §9.1's twelve pinned shots
@@ -363,6 +384,301 @@ export const SHOTS = {
       applyLegX(boneByName('LegL'), leftAngles.knee);
       applyLegX(boneByName('FootL'), leftAngles.ankle);
       spawned.built.skeleton.bones[0].updateMatrixWorld(true);
+    },
+  },
+
+  // UI-7 — one of `12-testing.md` §9.1's twelve pinned shots, M3's own row.
+  // §9.1 describes this shot as "the grid + rare comparison tooltip + the
+  // paperdoll" — the paperdoll is UI-10 (M4), not built anywhere in this
+  // tree yet. Ruling D-22/O-60 (recorded before this ticket started): this
+  // shot IS captured and committed under this same name in M3, as the
+  // two-thirds M3 owns — the populated grid plus a rare tooltip with LIVE
+  // comparison, deliberately without the paperdoll. UI-10 extends this same
+  // `setup` and re-blesses the same shot name in M4 (`12` §9.3's own
+  // sanctioned "a shot's setup grows, the name doesn't" pattern) — see this
+  // entry's own `description` string below, which names the paperdoll, UI-10
+  // and M4 explicitly per D-22's own honesty requirement (O-50 is the
+  // regression a vague description here would risk repeating).
+  //
+  // Every item instance below is a hand-built `ItemInstance` literal (`01
+  // -data-model.md` §5.3 shape), not a `items.rollItem()` draw — this shot
+  // needs a DETERMINISTIC, reliably-comparable trio (two equipped rings
+  // plus a rare ring with known affixes) every run; `rollItem`'s own base/
+  // affix picks are real RNG draws that could just as easily land on a
+  // completely different base or roll zero affixes, which would make this
+  // shot flicker between "shows two comparison panels with real deltas" and
+  // "shows one panel with none" from one seed to the next. Real, already-
+  // accepted data only: every `baseId`/affix `id` below exists in
+  // `src/items/data/bases.js`/`data/affixes.js` today (ITEM-2/ITEM-5..8,
+  // landed) — this shot invents no game content, only the specific
+  // combination.
+  //
+  // Zero free variables (this file's own header, "must survive
+  // toString()+eval") — `makeItem` is declared INSIDE `setup`, closing over
+  // nothing but `setup`'s own `items` parameter.
+  inventory_full: {
+    id: 'inventory_full',
+    description: 'the populated inventory grid (nine real items across every equipment category) plus a rare ring\'s tooltip with LIVE two-panel comparison (ring1 + ring2, real delta chips) — this frame does NOT contain the paperdoll: UI-10 (M4) adds it and re-blesses this same shot name, per ruling D-22/O-60',
+    milestone: 'M3',
+    // §2.6's tooltip fade is `rate 26/s` on the game clock, integrated from
+    // `dt` (never a CSS transition) — 20 steps at FIXED_DT (1/60 s) is
+    // ~0.33 s of sim time, comfortably past the point the fade settles
+    // (1 - e^(-26*0.33)) > 0.9998), so the captured frame shows the
+    // tooltip/comparison panels at their full, settled opacity rather than
+    // mid-fade.
+    steps: 20,
+    setup: (engine, ctx) => {
+      const items = ctx.get('items');
+      const ui = ctx.get('ui');
+      const player = ctx.get('player');
+      const actor = player && player.actor;
+      if (!items || !ui || !actor) return;
+
+      ui.setScreen('game');
+
+      // Dev-only staging mutation, the same "reach into the live object
+      // graph directly" precedent `actor_walk_phase0`'s own bone-posing
+      // already sets (see this file's header) — clears every reqLevel/
+      // reqStr this shot's own fixtures below need, deterministically,
+      // without depending on a real level-up/stat-allocation flow that has
+      // nothing to do with what this shot pins.
+      actor.level = 20;
+      if (actor.attributes) actor.attributes.strength = 40;
+
+      let uid = 50000;
+      function makeItem(baseId, overrides) {
+        const base = items.base(baseId);
+        const o = overrides || {};
+        return {
+          uid: uid++,
+          baseId,
+          rarity: o.rarity || 'normal',
+          ilvl: o.ilvl || (base ? base.reqLevel : 1),
+          identified: o.identified === undefined ? true : o.identified,
+          quantity: 1,
+          rolls: o.rolls || { defense: 0, superior: 0, damageMin: base && base.weapon ? base.weapon.minDamage : 0, damageMax: base && base.weapon ? base.weapon.maxDamage : 0 },
+          affixes: o.affixes || [],
+          uniqueId: null, uniqueValues: [], nameOverride: o.nameOverride || null,
+          durability: base ? base.maxDurability : 1, maxDurability: base ? base.maxDurability : 1,
+          sockets: [], socketCount: 0,
+          grid: null, slot: null, ground: null,
+        };
+      }
+
+      // The populated grid — one item per major category/footprint shape,
+      // real base ids, `items.autoPlace` (ITEM-10, real first-fit packing).
+      const fillerIds = [
+        'axe_battle_normal', 'sword_short_normal', 'armour_quilted_normal',
+        'gloves_wraps_normal', 'boots_hide_normal', 'helm_cap_normal',
+        'shield_buckler_normal', 'belt_sash_normal', 'amulet_cord',
+      ];
+      for (let i = 0; i < fillerIds.length; i++) {
+        items.autoPlace('inventory', makeItem(fillerIds[i], {}));
+      }
+
+      // Two equipped rings — real affixes, distinct values, so the
+      // comparison's own delta chips are genuinely non-zero on screen (not
+      // just structurally present).
+      const ring1 = makeItem('ring_iron', { rarity: 'normal', affixes: [{ id: 'pfx_life_1', kind: 'prefix', values: [11] }] });
+      const ring2 = makeItem('ring_iron', { rarity: 'magic', affixes: [{ id: 'sfx_res_all_1', kind: 'suffix', values: [5, 5, 5, 5, 5, 5] }] });
+      items.equip(actor, ring1, 'ring1');
+      items.equip(actor, ring2, 'ring2');
+
+      // The hovered rare ring — identified (so the full name/property block
+      // renders, not the "Unidentified" state), carrying both a fire-flat
+      // pair and an all-resistances affix so both a "pair merge" and a
+      // "resistance merge" property line are visible with live deltas
+      // against both equipped rings at once.
+      const hoverRing = makeItem('ring_iron', {
+        rarity: 'rare',
+        identified: true,
+        nameOverride: { headIndex: 0, tailIndex: 0, code: 0, en: 'Widow\'s Grasp', ru: 'Хватка Вдовы' },
+        affixes: [
+          { id: 'pfx_flat_fire_1', kind: 'prefix', values: [4, 10] },
+          { id: 'sfx_res_all_1', kind: 'suffix', values: [8, 8, 8, 8, 8, 8] },
+        ],
+      });
+
+      ui.openInventory();
+      // Both live paths this ticket's clause 4 covers, exercised together:
+      // `setCompareHeld(true)` (the Ctrl-held path) AND `showTooltip`'s own
+      // `compare` argument (the open-time path) both say "on" here, which
+      // is the steady state any real play session reaches the moment Ctrl
+      // is held over an item — not a contrived one-path-only demo.
+      ui.setCompareHeld(true);
+      ui.showTooltip(hoverRing, 260, 240, true);
+    },
+  },
+
+  // ITEM-15 — dev-only, NOT one of `12-testing.md` §9.1's twelve pinned
+  // shots (there is no M3 icon row there — icons are step 11 of `04-items.md`
+  // §12, the last M3 step, and `12` §9.1 was fixed before it landed). Never
+  // blessed under `tests/fixtures/shots/` — same `actor_ranker`/
+  // `actor_walk_phase*` precedent this file's own header already documents:
+  // determinism is proven by `tools/imagediff.mjs` (or a manual hash
+  // compare) finding two separate `capture.mjs --shot ui_icons` runs
+  // byte-identical, never by a committed baseline.
+  //
+  // ---------------------------------------------------------------------
+  // Round 3 correction — the frame must actually SHOW the icons
+  // ---------------------------------------------------------------------
+  // `04-items.md` §12 step 11's own acceptance and `09-ui.md` §15 U6
+  // ("renders one of every base at every rarity in a CONTACT SHEET") are
+  // both explicit that this shot's job is a human-visible sheet, not a
+  // side-effect proof with an unrelated frame. An earlier version of this
+  // entry called `items.icon()` for its side effect only and left the
+  // captured WebGL frame as `ui_clean`'s cleared-scene state — two captures
+  // came back byte-identical, which is real but PROVES NOTHING about the
+  // icons (a frame with no icons in it is trivially stable). That is the
+  // exact O-50 failure shape a shot's `description` promising more than its
+  // pixels deliver: caught before landing, fixed here.
+  //
+  // `items.icon()` returns a 2D `OffscreenCanvas` bitmap — it has no owned
+  // place in the WebGL scene (`ctx.scene`) and `ui`'s real DOM wiring for it
+  // is a different, not-yet-built ticket (`src/ui/inventory.js` still draws
+  // its own placeholder glyph — grep confirms: "Icon placeholders —
+  // items.icon() does not exist yet (ITEM-15)"), and `src/ui/` is out of
+  // this ticket's file grant regardless. But `src/dev/shots.js` is dev-only
+  // TOOLING, not production `ui` — ARCHITECTURE.md's ownership map keeps
+  // `src/dev/` separate from every subsystem directory for exactly this
+  // reason, and a shot's `setup` composing a subsystem's generated output
+  // onto a visible surface is already the established pattern here
+  // (`actor_ranker`/`actor_walk_phase*` build real `three` meshes from
+  // `actors`' output). This entry does the equivalent for 2D bitmaps: it
+  // builds its OWN plain DOM `<canvas>` (`document.createElement('canvas')`
+  // — legal here because `setup` runs INSIDE THE PAGE, a real browser realm,
+  // and `src/dev/` is not one of `tools/check-imports.mjs`'s scanned N-surface
+  // roots — see that tool's own root list), draws every generated icon
+  // bitmap into it via `drawImage`, and appends it to `document.body` at a
+  // z-index (`999999999`) far above `ui`'s own root (`src/ui/style.js`:
+  // `.cl2-ui { z-index: 1000; }`) so it is what `page.locator('#game')
+  // .screenshot()` actually captures — that call clips a full COMPOSITED
+  // page screenshot to `#game`'s bounding rect (confirmed by how `ui_clean`
+  // itself already captures `ui`'s DOM overlay, which also lives outside the
+  // `<canvas id="game">` element), not a canvas-internals readback, so any
+  // opaque, higher-z-index DOM content covering that same screen region is
+  // exactly what ends up in the PNG.
+  //
+  // Layout: all 305 tiles (61 equipment bases x 5 rarities, `04-items.md`
+  // §12 step 11's literal count — nothing was trimmed for legibility) in a
+  // 20-column x 16-row grid (320 cells, 15 left blank), each cell exactly
+  // 64x45 px (1280/20, 720/16 — both exact, no rounding drift), each icon
+  // bitmap uniformly scaled to CONTAIN within its cell (aspect preserved,
+  // centred, 1 px padding) via `drawImage`. Fill order is row-major over
+  // `items.bases` filtered to equipment, x `RARITIES` in order — the same
+  // deterministic order `tools/iconbench.mjs` and the previous round's
+  // side-effect-only version both already used, so there is nothing new to
+  // desynchronise. At this cell size fine per-base detail (rivet counts,
+  // gem facets) is not resolvable by eye — silhouette, material colour and
+  // the rarity frame/glow/mark are — which is enough for a human to see
+  // that 305 real, distinct icons are present, the actual job this shot has
+  // (`tools/iconbench.mjs`'s FNV-1a hash pass is the precise distinctness
+  // proof; this sheet is the visual one, and the two are complementary, not
+  // redundant — a hash cannot show a human that a shield looks like a
+  // shield).
+  //
+  // Zero free variables (this file's header, "must survive toString()+eval")
+  // — every local (`RARITIES`, `equipmentBases`, the grid constants, `sheet`,
+  // `col`/`row`) is declared inside `setup`, closing over nothing but its
+  // own `(engine, ctx)` parameters.
+  //
+  // SCOPE GAP — disclosed here (and in the `description` string below, which
+  // is where a reader actually meets this shot), not just in
+  // `src/items/icons/recipes.js`'s own header: the 305 icons drawn onto this
+  // sheet are real, distinct, in-budget renders (`tools/iconbench.mjs`
+  // proves both) from a WORKING ENGINE against GENERIC recipes — they are
+  // not yet the DESIGNED icons. `04-items.md` §11.1 is a 61-row table of
+  // hand-authored per-base parameters (crescent spans, back-spike positions,
+  // rivet/prong counts, gem hues, named `haft`/`pommel` shapes...) that this
+  // ticket's recipes do not transcribe; each recipe is driven only by
+  // `ItemBase.surface`/`.tier`/`.iconSeed` instead. Closing that gap is a
+  // later content-authoring pass over the same primitives library, not a
+  // re-open of this ticket. Two smaller, same-reason simplifications: the
+  // `-22°` rotation `09-ui.md` §7.3 specifies for weapons in a footprint
+  // taller than it is wide is not applied, and that same section's iconSeed
+  // tint band ("value ±8%") is read as a MULTIPLICATIVE shift on HSL
+  // lightness (`l * (1 + valMul)`), not an absolute one — an unstated but
+  // plausible reading of "±8%" that a content pass revisiting §11.1 should
+  // re-confirm.
+  ui_icons: {
+    id: 'ui_icons',
+    description: "dev-only, NOT one of 12-testing.md §9.1's twelve pinned shots — a 20x16-cell (64x45 px) contact sheet of all 305 real items.icon() renders (04-items.md §12 step 11 / 09-ui.md §15 U6: 61 equipment bases x 5 rarities, RARITIES order, row-major), each bitmap drawImage'd aspect-preserved into its cell; composited on a plain DOM <canvas> appended to document.body at z-index 999999999 (above ui's own z-index:1000 root) so page.locator('#game').screenshot() — which clips a composited page screenshot, not a canvas-internals readback — actually captures it. SCOPE GAP: these are real, distinct, in-budget renders from a WORKING ENGINE against GENERIC recipes parameterised only by surface/tier/iconSeed — NOT YET 04-items.md §11.1's 61 hand-authored per-base parameters (crescent spans, back-spike positions, rivet/prong counts, gem hues, named haft/pommel shapes); closing that gap is a later content-authoring pass, not this ticket's. Two smaller simplifications for that same pass to revisit: the -22° tall-weapon rotation of 09-ui.md §7.3 is skipped, and that section's iconSeed 'value ±8%' tint is read as a multiplicative HSL-lightness shift, not an absolute one",
+    milestone: 'M3',
+    steps: 1,
+    setup: (engine, ctx) => {
+      const children = ctx.scene.children.slice();
+      for (let i = 0; i < children.length; i++) ctx.scene.remove(children[i]);
+
+      const items = ctx.get('items');
+      if (!items || typeof items.icon !== 'function') return;
+
+      const RARITIES = ['normal', 'superior', 'magic', 'rare', 'unique'];
+      const bases = items.bases;
+      const equipmentBases = [];
+      for (let i = 0; i < bases.length; i++) {
+        const b = bases[i];
+        const isEquipment = (b.category === 'weapon' && b.id !== 'unarmed') || b.category === 'armour' || b.category === 'jewelry';
+        if (isEquipment) equipmentBases.push(b);
+      }
+
+      const VIEW_W = 1280, VIEW_H = 720;
+      const COLS = 20, ROWS = 16; // 320 cells for 305 tiles — see this entry's header
+      const TILE_W = VIEW_W / COLS;
+      const TILE_H = VIEW_H / ROWS;
+
+      const sheet = document.createElement('canvas');
+      sheet.id = 'cl2-dev-icon-sheet';
+      sheet.width = VIEW_W;
+      sheet.height = VIEW_H;
+      sheet.style.position = 'fixed';
+      sheet.style.left = '0px';
+      sheet.style.top = '0px';
+      sheet.style.width = VIEW_W + 'px';
+      sheet.style.height = VIEW_H + 'px';
+      sheet.style.zIndex = '999999999';
+      sheet.style.pointerEvents = 'none';
+      document.body.appendChild(sheet);
+
+      const g = sheet.getContext('2d');
+      g.fillStyle = '#0b0e14';
+      g.fillRect(0, 0, VIEW_W, VIEW_H);
+
+      let uid = 900000;
+      let col = 0;
+      let row = 0;
+      for (let i = 0; i < equipmentBases.length; i++) {
+        const base = equipmentBases[i];
+        for (let r = 0; r < RARITIES.length; r++) {
+          const rarity = RARITIES[r];
+          if (row < ROWS) {
+            const icon = items.icon({
+              uid: uid++,
+              baseId: base.id,
+              rarity,
+              ilvl: base.reqLevel || 1,
+              identified: true,
+              quantity: 1,
+              rolls: { defense: 0, superior: rarity === 'superior' ? 10 : 0, damageMin: 0, damageMax: 0 },
+              affixes: [],
+              uniqueId: null, uniqueValues: [], nameOverride: null,
+              durability: base.maxDurability, maxDurability: base.maxDurability,
+              sockets: [], socketCount: 0,
+              grid: null, slot: null, ground: null,
+            });
+            if (icon) {
+              const dx = col * TILE_W, dy = row * TILE_H;
+              const pad = 1;
+              const availW = TILE_W - pad * 2, availH = TILE_H - pad * 2;
+              const scale = Math.min(availW / icon.width, availH / icon.height);
+              const dw = icon.width * scale, dh = icon.height * scale;
+              const ox = dx + (TILE_W - dw) / 2, oy = dy + (TILE_H - dh) / 2;
+              g.drawImage(icon, ox, oy, dw, dh);
+            }
+          }
+          col++;
+          if (col >= COLS) { col = 0; row++; }
+        }
+      }
     },
   },
 };

@@ -121,6 +121,8 @@ import { PlayerSystem } from './player/index.js';
 import { NavSystem } from './nav/index.js';
 import { CombatSystem } from './combat/packet.js';
 import { UiSystem } from './ui/index.js';
+import { ItemsSystem } from './items/index.js';
+import { SaveSystem } from './save/index.js';
 
 /** `11-flows.md` §1 B13: the frame count, not a rAF race, raises `__READY__`. */
 const BOOT_FRAMES = 3;
@@ -446,6 +448,8 @@ export async function boot(opts = {}) {
   registry.add(NavSystem);
   registry.add(CombatSystem);
   registry.add(UiSystem);
+  registry.add(ItemsSystem);
+  registry.add(SaveSystem);
   // Next one goes directly below this line, same two-line shape. This
   // block's line count is therefore not fixed — see this file's "What
   // doesn't exist yet" header for why nothing may assert a literal total
