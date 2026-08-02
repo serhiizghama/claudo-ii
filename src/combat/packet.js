@@ -46,16 +46,112 @@
 // ---------------------------------------------------------------------------
 // Cross-subsystem data gaps this ticket ran into, and how each was resolved
 // ---------------------------------------------------------------------------
-// 1. No `skills` table exists yet (`src/skills/`, M2/M3). `03 §6.1` B2 wants
-//    `skill.weaponDamage` ("100 for a basic attack") and B8 wants
-//    `onHitStatus`/synergy data a skill would carry. Until `src/skills/`
-//    lands, `buildAttackPacket`/`buildSpellPacket` behave as if every call is
-//    a basic attack: `BASIC_ATTACK_WEAPON_DAMAGE = 100` unconditionally,
-//    `skillScale` fixed at `BASIC_SKILL_SCALE = 1.00`, no `onHitStatus`
-//    riders ever populated. `skillId`/`level` are still accepted and stored
-//    as packet provenance (`sourceSkillId`/`sourceLevel`) so a real caller's
-//    request shape does not have to change once skills exist. Flagged in
-//    this ticket's report as "missing from the API/data".
+// 1. CMBT-10/D-59 — CLOSED for the damage-curve half, still open for the
+//    rest. `src/skills/` now exists (M2/M3) and `03 §6.1` B2's
+//    `skill.weaponDamage` ("100 for a basic attack") and B7's "...and the
+//    skill's flatDamage" are both wired below: `buildAttackPacket`/
+//    `buildSpellPacket` resolve `SKILL_BY_ID[skillId]` (see "Where a skill's
+//    OWN curve comes from" below) and feed its real `weaponDamage`/
+//    `flatDamage` curve into B2/B7 for the given `level`, instead of the
+//    flat `BASIC_ATTACK_WEAPON_DAMAGE = 100` this file used unconditionally
+//    before. `skillScale` (B2's OTHER coefficient, `03 §4.3`'s attack-speed
+//    term, unrelated to weaponDamage) stays fixed at `BASIC_SKILL_SCALE =
+//    1.00` — no skill's `attackScale` is read by `attackInterval()` yet —
+//    and B8's `onHitStatus`/synergy riders are STILL never populated here:
+//    `onHitStatus` is applied by `skills/status.js#applyOnHitStatuses` AFTER
+//    `resolve()` returns (by design — see that file's own header, "riders
+//    are applied AFTER resolve(), never before"), and B2/B7's own "including
+//    synergy bonuses (§8.7)" clause is likewise a CALLER-side multiply today
+//    (`src/skills/summon.js`'s own `skills.synergyBonus(owner, 'unity',
+//    'flatDamage')`, applied to `packet.lightMin/lightMax` AFTER
+//    `buildSpellPacket` returns — the established precedent this ticket
+//    follows, not invents). Neither gap is this ticket's acceptance
+//    criterion (which names only "a skill's own damage curve"); both are
+//    flagged again in this ticket's report as the two pieces of gap 1 that
+//    remain.
+//
+//    `skillId`/`level` were already accepted and stored as packet provenance
+//    (`sourceSkillId`/`sourceLevel`) before this ticket — no caller's
+//    request shape changes: every existing call site
+//    (`combat.buildAttackPacket(actor, skillId, level)` /
+//    `buildSpellPacket(...)`, unchanged signatures, `02-api-contracts.md`
+//    §8) already passed a real `skillId`/`level` for a real skill; this
+//    ticket only changed what `combat` DOES with them.
+//
+//    ---------------------------------------------------------------------
+//    Where a skill's OWN curve comes from — the design decision this
+//    ticket had to make, and its cost
+//    ---------------------------------------------------------------------
+//    `combat` cannot import the `skills` SUBSYSTEM (`ARCHITECTURE.md` rule
+//    2: "never import another subsystem's module... `skills` already
+//    depends on `combat`" — a `combat -> skills` runtime import would be
+//    circular). Three shapes were weighed for getting a skill's coefficient
+//    into B2/B7 without that:
+//
+//    (a) THE CALLER PASSES IT — `skills` resolves the curve and hands the
+//        number(s) into `buildAttackPacket`/`buildSpellPacket` as new
+//        parameters. Rejected on a PRACTICAL, not just architectural,
+//        ground: every real call site lives OUTSIDE this ticket's file
+//        grant (`src/skills/channel.js`, `ground.js`, `imbue.js`,
+//        `summon.js`, `projectile.js`, `mobility.js`, `impl/rune_strike.js`,
+//        `impl/cleaving_strike.js` — nine call sites across eight files,
+//        none of them `src/skills/index.js`). A signature change here would
+//        leave every one of those callers passing the OLD shape, silently
+//        reverting to the flat-100 default the moment `out` or a changed
+//        parameter list stopped matching — i.e. this shape could not
+//        actually ship from this ticket's grant.
+//    (b) COMBAT READS `src/skills/data/skills.js` DIRECTLY (chosen). It is
+//        the exact category `ARCHITECTURE.md` rule 9 exists for: "plain-
+//        object tables under their owning subsystem's `data/` folder, so
+//        the balance harness can read them headlessly" — `tools/
+//        balance.mjs` already does precisely this import
+//        (`import { SKILLS } from '../src/skills/data/skills.js'`), and
+//        that file's own header states it is "Flat data, zero logic, zero
+//        imports of engine code" — no subsystem instance, no lifecycle, no
+//        `ctx`, nothing rule 2's "get it at runtime via `ctx.get(id)`"
+//        prescription is actually protecting against (a live, stateful
+//        `SkillsSystem`). The cost, named honestly: this is still a
+//        `combat -> skills` STATIC import, which is rule 2's letter, not
+//        just its spirit, and `CLASS_SCALE_TABLE` in `./data/weapons.js`
+//        (this same file's own CMBT-1 precedent, for the analogous
+//        `class.meleeScale`/`spellScale` problem) chose the OPPOSITE
+//        resolution — a small, local, documented DUPLICATE of just the
+//        needed columns, specifically to avoid this exact cross-subsystem
+//        edge. This ticket diverges from that precedent deliberately: the
+//        class table is 3 classes x 4 stable, rarely-tuned numbers; the
+//        skill damage curves are up to 30 records x up to 6 fields each,
+//        under ACTIVE balance iteration (`03-combat-math.md` itself is nine
+//        of its own thirteen sections of ongoing calibration), and the
+//        orchestrator's own brief states these 30 records are "verified
+//        number by number by the orchestrator" against `03 §8` — a hand-
+//        copied duplicate here would be a SECOND transcription of the same
+//        30 records, each future balance edit landing in `skills.js` alone
+//        and silently stranding this file's copy, which is a strictly worse
+//        failure mode than the import's static coupling. Flagged plainly
+//        for the orchestrator: if this precedent split (weapons.js
+//        duplicates, packet.js imports) is not acceptable, the fix is a
+//        `02-api-contracts.md`/`ARCHITECTURE.md` note making shape (b)'s
+//        exception explicit — not a request to revisit the class-scale
+//        table, which is unaffected by this ticket.
+//    (c) THE CALLER ADJUSTS THE PACKET AFTER BUILD — `02 §8`'s caller-
+//        adjustable whitelist (`radius`, `pierceIndex`, `onHitStatus`,
+//        `knockback`, `originX/Y/Z`, `requesterOwnsRageCredit`) does not
+//        include any damage field, and SKIL-9's ground-tick packets already
+//        stretch that precedent past the documented list (see `ground.js`'s
+//        own header, "beyond `02-api-contracts.md`'s own documented
+//        'caller-adjustable' list... but the EXACT same category... this
+//        file's own header already establishes and ships as accepted
+//        code"). This ticket does not lean on that further-stretched
+//        precedent for the GENERAL weaponDamage/flatDamage wiring (shape
+//        (b) is a real fix, not another workaround), but flags SKIL-9's own
+//        stretch here as something worth the orchestrator's separate
+//        attention, per this ticket's own brief.
+//
+//    No `02-api-contracts.md` row is needed for this decision:
+//    `buildAttackPacket`/`buildSpellPacket`'s public signatures are
+//    unchanged (`(source, skillId, level, out?)`, exactly as documented) —
+//    only what this file does internally with the already-contracted
+//    `skillId`/`level` arguments changed.
 //
 // 2. No `items` table exists yet (`src/items/`, M3) — `Actor.equipment` is
 //    always `null` (`src/actors/pool.js#createActorRecord`). `resolveWeapon()`
@@ -181,6 +277,15 @@
 // `checkGlobals: true` the moment this directory exists).
 
 import { WEAPONS, CLASS_SCALE_TABLE, NEUTRAL_CLASS_SCALE } from './data/weapons.js';
+// CMBT-10/D-59 — a `combat -> skills/data` STATIC import, not `ctx.get`.
+// `SKILLS` is the flat, logic-free, zero-engine-import table this file's own
+// header ("Where a skill's OWN curve comes from") already argues is the
+// category `ARCHITECTURE.md` rule 9 exists to make headlessly readable —
+// see that header block for the full reasoning, the two alternatives
+// weighed, and the cost named against `./data/weapons.js`'s own opposite
+// (duplicate-instead-of-import) precedent for the analogous class-table
+// problem.
+import { SKILLS } from '../skills/data/skills.js';
 import { chanceToHit, blockChanceOf } from './tohit.js';
 import {
   DamageResultPool,
@@ -248,13 +353,88 @@ export const BASE_POISON_DURATION = 4.0;
 /** Analogous chill base — see the file header for the same reasoning. */
 export const BASE_COLD_DURATION = 2.0;
 
-/** `03-combat-math.md` §6.1 B2: "100 for a basic attack." Used
- * unconditionally today — see the file header, gap 1. */
+/** `03-combat-math.md` §6.1 B2: "100 for a basic attack." Still the default
+ * for a basic attack (`skillId` null/`'attack'`/unrecognised) and for any
+ * skill whose own `weaponDamage` curve is `null` (a spell) — see
+ * `weaponDamagePercentFor` below for the real-skill case, wired by
+ * CMBT-10/D-59. */
 export const BASIC_ATTACK_WEAPON_DAMAGE = 100;
 /** `03-combat-math.md` §4.3's `skill.attackScale` term, fixed at 1.00 (no
- * skill table to read a real per-skill value from yet — see the file
- * header, gap 1). */
+ * skill table read for THIS one yet — `attackInterval()`'s own gap, not
+ * CMBT-10/D-59's: that ticket's acceptance criterion is a skill's DAMAGE
+ * curve, not its `attackScale`. See the file header, gap 1, "still open"). */
 export const BASIC_SKILL_SCALE = 1.0;
+
+// ---------------------------------------------------------------------------
+// CMBT-10/D-59 — the skill lookup table and the two small pure helpers B2/B7
+// read from it. Built ONCE at module load from the imported `SKILLS` (see
+// the file header for why this file may import it at all); every lookup
+// after that is a single plain-object property read — no `Map`, no
+// allocation, matching this file's own "Zero-allocation / determinism
+// discipline" section.
+// ---------------------------------------------------------------------------
+
+/** `SKILLS[i].id -> SkillDefinition`, built once. A plain `Object.create(null)`
+ * dictionary (no prototype chain to shadow a skillId against, same
+ * reasoning `CLASS_SCALE_TABLE`'s own plain-object lookup already
+ * establishes in `./data/weapons.js`). */
+const SKILL_BY_ID = Object.create(null);
+for (let i = 0; i < SKILLS.length; i++) SKILL_BY_ID[SKILLS[i].id] = SKILLS[i];
+
+/** `01-data-model.md` §6.1's `element` field ('fire'|'cold'|'lightning'|
+ * 'poison'|'magic'|'physical') -> this file's own `ELEMENTS` array index
+ * (`ELEMENTS[2] === 'light'`, not `'lightning'` — `01`'s own packet-field-
+ * prefix naming quirk, already documented where `ELEMENTS` is declared
+ * below). `'physical'` (every weapon-damage skill, every passive/buff/
+ * toggle with no damage of its own) has no entry — `skillFlatElementIndex`
+ * below returns `-1` for it, which never matches any `ELEMENTS` index in
+ * `stepB7`'s loop, i.e. a correct no-op. */
+const SKILL_ELEMENT_TO_INDEX = Object.freeze({ fire: 0, cold: 1, lightning: 2, poison: 3, magic: 4 });
+
+/** `skillId -> SkillDefinition | null`. `null`/`undefined`/`'attack'`/any
+ * id absent from `SKILLS` (a basic attack, or a test-only placeholder id —
+ * `tests/combat/packet.test.js`'s own `'test_poison_bolt'`) all resolve to
+ * `null`, preserving this file's pre-CMBT-10 default behaviour exactly.
+ * @param {string|null|undefined} skillId
+ * @returns {object|null}
+ */
+function skillRecordFor(skillId) {
+  return (skillId && SKILL_BY_ID[skillId]) || null;
+}
+
+/** `03-combat-math.md` §6.1 B2, resolved for a real skill: `skillDef.
+ * weaponDamage.base + perLevel × (level − 1)` — `03` §8's own "L denotes
+ * effective skill level... base + perLevel × (L − 1)" formula, the same
+ * arithmetic `src/skills/cost.js#levelValue` already applies (a small,
+ * self-contained duplicate here rather than an added cross-subsystem call —
+ * no `weaponDamage`/`flatDamage` curve in `03` §8 carries a `cap`, so
+ * `levelValue`'s own cap-clamp branch would be dead code if reached for).
+ * Falls back to `BASIC_ATTACK_WEAPON_DAMAGE` when `skillDef` is `null` (a
+ * basic attack) or carries no `weaponDamage` curve of its own (a spell,
+ * `01-data-model.md` §6.1: "null for spells").
+ * @param {object|null} skillDef
+ * @param {number} level
+ * @returns {number} percent, e.g. `100` for a basic attack, `143` for
+ *   `rune_strike` at L5.
+ */
+function weaponDamagePercentFor(skillDef, level) {
+  if (skillDef && skillDef.weaponDamage) {
+    return skillDef.weaponDamage.base + skillDef.weaponDamage.perLevel * (level - 1);
+  }
+  return BASIC_ATTACK_WEAPON_DAMAGE;
+}
+
+/** `skillDef.element -> ELEMENTS` index, or `-1` for `'physical'`/any value
+ * `SKILL_ELEMENT_TO_INDEX` does not carry. A single primitive-returning
+ * property lookup — no allocation.
+ * @param {string} element
+ * @returns {number}
+ */
+function skillFlatElementIndex(element) {
+  const idx = SKILL_ELEMENT_TO_INDEX[element];
+  return idx === undefined ? -1 : idx;
+}
+
 /** Placeholder `skill.castTime` — see the file header, gap 4. NOT a spec
  * figure; chosen to match `unarmed`'s attack time as a neutral standby
  * value, nothing more. */
@@ -415,6 +595,10 @@ function createDamagePacket(poolIndex) {
 
     lifeSteal: 0, manaSteal: 0, lifeOnHit: 0, manaOnHit: 0, manaReturnPercent: 0,
 
+    // ─── requester-owned economy (SKIL-7/D-52, src/combat/onhit.js's own
+    // header — not yet in 01-data-model.md §8; flag pending a doc update) ──
+    requesterOwnsRageCredit: false,
+
     // ─── impulse ──────────────────────────────────────────────────────────
     knockback: 0, knockbackDistance: 0, hitStop: 0,
 
@@ -459,6 +643,8 @@ function resetPacketFields(p) {
   p.onHitCount = 0;
 
   p.lifeSteal = 0; p.manaSteal = 0; p.lifeOnHit = 0; p.manaOnHit = 0; p.manaReturnPercent = 0;
+
+  p.requesterOwnsRageCredit = false;
 
   p.knockback = 0; p.knockbackDistance = 0; p.hitStop = 0;
 
@@ -603,21 +789,45 @@ export function stepB6(packet, classScale, physicalDamagePercent) {
 }
 
 /** B7: elemental assembly. For each of fire/cold/lightning('light')/
- * poison/magic: `stats.<el>Min`/`Max` (already the composed total of
- * weapon+affixes+skill.flatDamage — `composeStats` summed those layers;
- * see the file header, gap 2) × that element's own percent stat ×
- * `elementalDamagePercent`. Poison/cold additionally carry their assembled
- * total duration — see the file header, "Poison is a TOTAL".
+ * poison/magic: `stats.<el>Min`/`Max` (the composed total of affixes —
+ * gear, other passives; `composeStats`' own layers) PLUS the casting
+ * skill's own `flatDamage` curve when `el` is that skill's `element`
+ * (CMBT-10/D-59 — see the file header; `03 §6.1` B7: "min/max from the
+ * weapon, affixes AND THE SKILL'S FLATDAMAGE, then the element's percent
+ * stats" — the skill term was never added here before this ticket) ×
+ * that element's own percent stat × `elementalDamagePercent`. Poison/cold
+ * additionally carry their assembled total duration — see the file header,
+ * "Poison is a TOTAL".
+ *
+ * The three extra parameters are OPTIONAL and default to "no skill flat
+ * contribution" — every pre-CMBT-10 2-arg call (`tests/combat/
+ * packet.test.js`'s own direct `stepB7(packet, stats)` calls, E5 included)
+ * reproduces byte-identical output; only `buildAttackPacket`/
+ * `buildSpellPacket` below pass real values, resolved once by
+ * `skillFlatElementIndex`/the casting skill's curve before this call, never
+ * as a fresh `${el}...` template string per element (this file's own "do
+ * not add an eleventh" budget, O-59).
  * @param {object} packet
  * @param {object} stats a `StatBlock`.
+ * @param {number} [skillFlatElementIndex] index into `ELEMENTS` the casting
+ *   skill's own `flatDamage` belongs to, or `-1` for none (default).
+ * @param {number} [skillFlatMin] the casting skill's own flat min, already
+ *   evaluated for `level` (default `0`).
+ * @param {number} [skillFlatMax] likewise, flat max (default `0`).
  */
-export function stepB7(packet, stats) {
+export function stepB7(packet, stats, skillFlatElementIndex = -1, skillFlatMin = 0, skillFlatMax = 0) {
   const elementalMult = 1 + stats.elementalDamagePercent / 100;
   for (let i = 0; i < ELEMENTS.length; i++) {
     const el = ELEMENTS[i];
     const pctMult = (1 + stats[`${el}DamagePercent`] / 100) * elementalMult;
-    packet[`${el}Min`] = stats[`${el}Min`] * pctMult;
-    packet[`${el}Max`] = stats[`${el}Max`] * pctMult;
+    let baseMin = stats[`${el}Min`];
+    let baseMax = stats[`${el}Max`];
+    if (i === skillFlatElementIndex) {
+      baseMin += skillFlatMin;
+      baseMax += skillFlatMax;
+    }
+    packet[`${el}Min`] = baseMin * pctMult;
+    packet[`${el}Max`] = baseMax * pctMult;
   }
   packet.poisonDuration = BASE_POISON_DURATION + stats.poisonDuration;
   packet.coldDuration = BASE_COLD_DURATION + stats.coldDuration;
@@ -755,6 +965,14 @@ export class CombatSystem {
     this._ctx = null;
     this._pool = null;
     this._lastPoolWarnStep = -Infinity;
+    // CMBT-10/D-59 — reused scratch for the per-call skill-curve resolution
+    // `buildAttackPacket`/`buildSpellPacket` share below, via
+    // `_resolveSkillCurve()`. Same "preallocated, mutated per call, never
+    // reallocated" discipline every other `this._*Scratch` field in this
+    // class already uses (see `init()`'s own block for the fuller
+    // precedent); safe as a single shared object because neither build
+    // method is reentrant (no event dispatch happens mid-build).
+    this._skillCurveScratch = { weaponDamagePercent: BASIC_ATTACK_WEAPON_DAMAGE, flatElementIndex: -1, flatMin: 0, flatMax: 0 };
   }
 
   async init(ctx) {
@@ -788,6 +1006,54 @@ export class CombatSystem {
       thornsEnv: null, isThornsCounter: true,
     };
 
+    // CMBT-8/D-51 — the pooled-object OWNERSHIP RULE for this listener,
+    // fixing the leak `02-api-contracts.md` §8's own "never hold a
+    // DamagePacket or DamageResult past the synchronous dispatch of the
+    // event that carried it" rule already forbids:
+    //
+    //  PACKET: owned by the REQUESTER (whoever emitted `combat:hit-request`
+    //  after acquiring the packet via `buildAttackPacket`/`buildSpellPacket`/
+    //  `scratchPacket`) — this listener never acquires or releases one.
+    //  Both real callers in this tree (`ai/brains/melee.js#emitRankerHit`,
+    //  `src/skills/impl/cleaving_strike.js#resolveHit`) already follow this:
+    //  they call `releasePacket()` themselves once they are done with it.
+    //  This matters because a single packet is legitimately reused across
+    //  SEVERAL `combat:hit-request` emits for one action (a cone/nova hitting
+    //  N targets with the same packet, `cleaving_strike`'s own shape) —
+    //  releasing it here after the FIRST resolve would zero it out from
+    //  under the remaining targets (`release()` resets fields in place on
+    //  the shared object), corrupting every hit after the first.
+    //
+    //  RESULT: this listener is the ONLY consumer of `resolve()`'s return
+    //  value on this path — `combat:hit-request` is fire-and-forget (no
+    //  event carries `resolve()`'s return value back to the emitter), and
+    //  everything that needs the outcome already read it off `actor:damage`
+    //  itself, synchronously, before this call returns ("copy what you need
+    //  during dispatch"). Before this fix, `resolve(packet, target)` was
+    //  called with no `out`, so every call acquired a fresh `DamageResult`
+    //  from `_resultPool` and NOTHING ever released it — `DamageResultPool
+    //  acquire()` returns `null` once dry (256 calls), and every
+    //  `combat:hit-request` after that silently dropped (`resolve()` itself
+    //  returns `null` and does nothing). Fixed by handing `resolve()` a
+    //  permanent, reused scratch `DamageResult` as `out` — the same
+    //  "preallocated, mutated per call" discipline `_sourceRefScratch`/
+    //  `_damagePayloadScratch` above already use — so this path never draws
+    //  from `_resultPool` at all and cannot leak by construction, not merely
+    //  by remembering to release. Safe to reuse across a cone's whole
+    //  multi-target loop for the same reason the packet reuse above is safe:
+    //  `resolveDamage()` resets it (`resetResultFields`) at the top of every
+    //  call, and nothing downstream holds a reference past its own
+    //  synchronous handling of that one hit's `actor:damage`.
+    //
+    //  Not reentrancy-safe by design, same assumption
+    //  `cleaving_strike.js#resolveHit`'s own `resolvingSource`/
+    //  `landedThisAction` scratch already documents: nothing in this
+    //  codebase re-emits `combat:hit-request` synchronously from inside an
+    //  `actor:damage` handler today, so a single shared scratch `out` is
+    //  safe. A future caller that DID would need this promoted the same way
+    //  `resolveDamage`'s own `thornsEnv` is a SECOND, separate scratch for
+    //  its one legitimate nested call.
+    this._hitRequestResultScratch = this._resultPool.acquire();
     // `ARCHITECTURE.md`'s event table: "combat:hit-request ... the only
     // entry point for a requested hit" — the sole listener. Subscribed once
     // here; `resolve()` re-derives `source` from the packet's own
@@ -795,7 +1061,7 @@ export class CombatSystem {
     // field carries (a packet must be resolvable on its own — see
     // `resolve.js`'s header).
     this._onHitRequest = ({ target, packet }) => {
-      this.resolve(packet, target);
+      this.resolve(packet, target, this._hitRequestResultScratch);
     };
     ctx.events.on('combat:hit-request', this._onHitRequest);
 
@@ -853,6 +1119,35 @@ export class CombatSystem {
     }
   }
 
+  /** CMBT-10/D-59 — resolves `skillId`'s own `weaponDamage`/`flatDamage`
+   * curve for `level` into `this._skillCurveScratch` (reused, mutated in
+   * place — see the constructor) and returns it. Shared by
+   * `buildAttackPacket`/`buildSpellPacket` below so the lookup/arithmetic
+   * lives in exactly one place. `skillId`/`level` may describe a basic
+   * attack (`null`/`'attack'`/unrecognised) or a spell/skill with no
+   * `flatDamage` of its own — both resolve to the pre-CMBT-10 defaults
+   * (`weaponDamagePercent = 100`, no flat injection), never a thrown error.
+   * @param {string|null|undefined} skillId
+   * @param {number} level
+   * @returns {{weaponDamagePercent:number, flatElementIndex:number, flatMin:number, flatMax:number}}
+   */
+  _resolveSkillCurve(skillId, level) {
+    const out = this._skillCurveScratch;
+    const skillDef = skillRecordFor(skillId);
+    out.weaponDamagePercent = weaponDamagePercentFor(skillDef, level);
+    if (skillDef && skillDef.flatDamage) {
+      out.flatElementIndex = skillFlatElementIndex(skillDef.element);
+      const fd = skillDef.flatDamage;
+      out.flatMin = fd.minBase + fd.minPerLevel * (level - 1);
+      out.flatMax = fd.maxBase + fd.maxPerLevel * (level - 1);
+    } else {
+      out.flatElementIndex = -1;
+      out.flatMin = 0;
+      out.flatMax = 0;
+    }
+    return out;
+  }
+
   /** `02-api-contracts.md` §8: `buildAttackPacket(source, skillId, level,
    * out?) => DamagePacket`. Runs B1-B8 for a weapon-based physical attack —
    * see the file header for the basic-attack-only limitation (gap 1).
@@ -875,14 +1170,15 @@ export class CombatSystem {
     const stats = requireStats(source);
     const weapon = resolveWeapon(source);
     const scale = classScaleFor(source.classId);
+    const curve = this._resolveSkillCurve(skillId, level); // CMBT-10/D-59
 
     stepB1(packet, weapon);
-    stepB2(packet, BASIC_ATTACK_WEAPON_DAMAGE);
+    stepB2(packet, curve.weaponDamagePercent);
     stepB3(packet, stats.enhancedDamage);
     stepB4(packet, stats.minDamage, stats.maxDamage);
     stepB5(packet, attributeBonusFor(weapon.handling, stats.strength, stats.dexterity));
     stepB6(packet, scale.meleeScale, stats.physicalDamagePercent);
-    stepB7(packet, stats);
+    stepB7(packet, stats, curve.flatElementIndex, curve.flatMin, curve.flatMax);
     stepB6Elemental(packet, scale.spellScale); // 03 §6.1 B6: elemental damage is always the flatDamage channel — see stepB6Elemental's own header
     stepB8(packet, { stats, source, skillId, level });
 
@@ -911,14 +1207,15 @@ export class CombatSystem {
 
     const stats = requireStats(source);
     const scale = classScaleFor(source.classId);
+    const curve = this._resolveSkillCurve(skillId, level); // CMBT-10/D-59
 
     stepB1(packet, null); // spells: physMin = physMax = 0
-    stepB2(packet, BASIC_ATTACK_WEAPON_DAMAGE);
+    stepB2(packet, curve.weaponDamagePercent); // a no-op while physMin/physMax are still 0 from B1, harmless if ever nonzero
     stepB3(packet, stats.enhancedDamage);
     stepB4(packet, stats.minDamage, stats.maxDamage);
     // B5 intentionally not called — "skipped entirely for spells" (03 §6.1).
     stepB6(packet, scale.spellScale, stats.physicalDamagePercent);
-    stepB7(packet, stats);
+    stepB7(packet, stats, curve.flatElementIndex, curve.flatMin, curve.flatMax);
     stepB6Elemental(packet, scale.spellScale);
     stepB8(packet, { stats, source, skillId, level });
 
@@ -1151,6 +1448,7 @@ export class CombatSystem {
     this._statusSpecScratch = null;
     this._damagePayloadScratch = null;
     this._resolveEnv = null;
+    this._hitRequestResultScratch = null;
     this._onHitRequest = null;
     this._statusEnv = null;
     this._onActorDamageForChill = null;

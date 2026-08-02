@@ -251,7 +251,11 @@ export function e13() {
     equipmentStats: {
       enhancedDamage: 35,
       lightMin: 12, lightMax: 25, // blade_seal's own flatDamage
-      manaReturnPercent: 8, // Runeblade's own stat
+      // manaReturnPercent no longer hand-set here: O-84/D-53 (SKIL-5) added
+      // the Runeblade class-base 8 to CLASS_TABLE, so composeStats()'s own
+      // `base` layer now supplies it (03-combat-math.md:223). The old
+      // equipment-layer workaround would now double it (base 8 + this 8 =
+      // 16) — removed, not zeroed, so nothing here shadows the real source.
     },
     life: 100, mass: 78,
   });

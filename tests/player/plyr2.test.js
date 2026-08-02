@@ -469,15 +469,21 @@ function driveOrder(ctx, player, actor, gx, gz) {
   player.intent.moveZ = gz;
   player.intent.sequence++;
 
+  const actors = ctx.get('actors');
   let steps = 0;
   while (player.intent.hasMoveOrder && steps < INTEGRATION_STEP_BUDGET) {
     // The real Engine's system loop runs every registered subsystem's
-    // fixedUpdate() each step, `nav`'s included — `nav.fixedUpdate` is what
-    // actually drains its request ring (`AStarScheduler.runSolves`) and
-    // resets its per-step accept throttle. This harness has no real Engine,
-    // so it must call it explicitly or every `requestPath` past the first
-    // handful silently "refuses" forever (the budget never replenishes).
+    // fixedUpdate() each step, `nav`'s and `actors`' included — `nav.fixedUpdate`
+    // is what actually drains its request ring (`AStarScheduler.runSolves`)
+    // and resets its per-step accept throttle, and `actors.fixedUpdate`
+    // (ACTR-21) is what carries a freshly spawned actor out of its 1.00 s
+    // `'spawning'` window (08 §5.5, 06-monsters-ai.md:1731) — without it
+    // `canMove()` stays false forever and this loop never moves the actor
+    // at all. This harness has no real Engine, so it must call both
+    // explicitly, in the real engine's own init-order (`nav` before
+    // `actors` before `player`, ARCHITECTURE.md's topological order).
     nav.fixedUpdate(H, ctx);
+    actors.fixedUpdate(H, ctx);
     player.fixedUpdate(H, ctx);
     ctx.time.step++;
     steps++;
@@ -558,7 +564,8 @@ test('integration: a nav.rebuild() mid-order (version bump) is survived — repa
   };
 
   for (let i = 0; i < 30; i++) {
-    nav.fixedUpdate(H, ctx); // see driveOrder's own comment — nav must be stepped too
+    nav.fixedUpdate(H, ctx); // see driveOrder's own comment — nav and actors must both be stepped too
+    actors.fixedUpdate(H, ctx);
     player.fixedUpdate(H, ctx);
     ctx.time.step++;
   } // let it get well underway
@@ -574,6 +581,7 @@ test('integration: a nav.rebuild() mid-order (version bump) is survived — repa
   let steps = 30;
   while (player.intent.hasMoveOrder && steps < INTEGRATION_STEP_BUDGET) {
     nav.fixedUpdate(H, ctx);
+    actors.fixedUpdate(H, ctx);
     player.fixedUpdate(H, ctx);
     ctx.time.step++;
     steps++;
@@ -710,10 +718,13 @@ function runScriptedOrder(ctx, nav, actors, follower, actor, start, goal) {
 
   for (; steps < STEP_BUDGET; steps++) {
     if (!follower.active) break;
-    // See driveOrder's own comment: nav.fixedUpdate must run every step too
-    // (it drains the A* request ring and resets the per-step accept
-    // throttle) — there is no real Engine in this harness to do it for us.
+    // See driveOrder's own comment: nav.fixedUpdate and actors.fixedUpdate
+    // must both run every step too (the former drains the A* request ring
+    // and resets the per-step accept throttle; the latter carries the actor
+    // out of its 1.00 s spawn window, ACTR-21) — there is no real Engine in
+    // this harness to do it for us.
     nav.fixedUpdate(FIXED_DT, ctx);
+    actors.fixedUpdate(FIXED_DT, ctx);
     follower.step(FIXED_DT, nav, actors, actor);
     ctx.time.step++;
     const dx = actor.x - refX;

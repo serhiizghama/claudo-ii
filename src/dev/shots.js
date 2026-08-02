@@ -157,7 +157,7 @@ export const SHOTS = {
   // this shot already runs is enough to paint it — no `steps` bump needed.
   ui_clean: {
     id: 'ui_clean',
-    description: "the UI overlay on the game screen (12-testing.md §9.1's \"the overlay with no world behind it\") — U1's plinth/orbs/XP bar, over a scene cleared of debugview.js's placeholder ground/capsule",
+    description: "the UI overlay on the game screen (12-testing.md §9.1's \"the overlay with no world behind it\") — U1's plinth/orbs/XP bar, over a scene cleared of debugview.js's placeholder ground/capsule — AND, as of M4 (ACTR-21, D-49), the life orb reads filled rather than the old fixture's 0/73: O-67 (vessels never filled on spawn) closed, so a freshly spawned actor now starts at full life — AND, as of PLYR-4, that full reading is 55/55, not the 73/73 this fixture showed until today: PlayerSystem.init() used to spawn the player without an explicit level, so actors.spawn() silently fell through to SPAWN_SPEC_DEFAULTS.level === 10 (a monster-oriented default), making the player accidentally level 10 (maxLife 73) even though the \"Lv 1\" label right next to the orb already said otherwise; PLYR-4 fixed the spawn (PLACEHOLDER_LEVEL = 1, plus ProgressTracker.seedFromActor()), so a fresh character now spawns at its real level 1 (maxLife 55) and 55/55 is what actually matches the Lv 1 label beside it. The rage orb stays 0/100, correctly — rage is a build-up resource that starts empty",
     milestone: 'M2',
     steps: 1,
     // Zero free variables — see this file's header, "pumpShot — AND a
@@ -416,9 +416,21 @@ export const SHOTS = {
   // Zero free variables (this file's own header, "must survive
   // toString()+eval") — `makeItem` is declared INSIDE `setup`, closing over
   // nothing but `setup`'s own `items` parameter.
+  // UI-10 (M4) re-bless — D-40/D-22/O-60. The M3 half of this ruling
+  // (recorded above, on `inventory_full`'s own original entry, before this
+  // ticket started) said UI-10 would "extend this same setup and re-bless
+  // the same shot name" once the paperdoll existed. It now does: the ONLY
+  // change below is `ui.openInventory()` -> `ui.toggleInventory()` (this
+  // ticket's own `toggleInventory` pairing — `09` §11.2's `I` binding now
+  // opens the character sheet alongside the inventory, see `./ui/index.js`)
+  // and this `description` string. Every fixture — the nine filler items in
+  // the inventory grid, the two equipped rings, the hovered rare ring's
+  // live two-panel comparison — is untouched, so the diff a maintainer sees
+  // against the OLD `inventory_full` fixture is exactly "the sheet panel
+  // and its paperdoll are now present", not a re-shuffled scene.
   inventory_full: {
     id: 'inventory_full',
-    description: 'the populated inventory grid (nine real items across every equipment category) plus a rare ring\'s tooltip with LIVE two-panel comparison (ring1 + ring2, real delta chips) — this frame does NOT contain the paperdoll: UI-10 (M4) adds it and re-blesses this same shot name, per ruling D-22/O-60',
+    description: 'the populated inventory grid (nine real items across every equipment category, ALL nine cells unobscured) plus a rare ring\'s tooltip with LIVE two-panel comparison (ring1 + ring2, real delta chips) — AND, as of UI-10 (M4, D-40/D-22/O-60), the character sheet opened as `I`\'s real pair-open behaviour, its ten equipment slots (ring1/ring2 populated, the rest empty), and the uiScene paperdoll rendered into its computed viewport rectangle, fully visible — THAT is this fixture\'s job (D-40: prove the paperdoll renders at all; nothing else guards that). What it does NOT guard: the tooltip\'s own anchor (260,240) sits over the sheet\'s left column, so the comparison stack covers part of the derived-stat block (Damage/Attack Rating/Defence/Chance to Block) and some attribute rows — a deliberate trade, not an oversight. The geometry makes all three (clear stat block, clear grid, visible paperdoll) impossible at once: a comparison panel is 288px min-width, the only gap that avoids both the sheet and the grid is ~212px wide with the ~40px paperdoll centered in it, so any anchor that clears the stat block instead fully hides the paperdoll (measured: 0/3000 sample px of its bbox visible) — confirmed by direct trial, not assumed. The stat block\'s own guard is `tests/ui/sheet.test.js` (16 tests + the <=104-node assert), not this pixel fixture; do not read a diff here as a character-sheet regression — AND, as of PLYR-4, the HUD life orb visible faintly behind the semi-transparent sheet panel now reads 55/104 rather than the previous 73/104: PlayerSystem.init() used to spawn the player without an explicit level, so actors.spawn() silently fell through to SPAWN_SPEC_DEFAULTS.level === 10 (maxLife 73); PLYR-4 fixed the spawn to the real level 1 (maxLife 55). The sheet\'s own derived Life stat (104) is unaffected — it is recomputed live from this setup\'s own `actor.level = 20` / `attributes.strength = 40` staging mutation, independent of the spawn-time life value PLYR-4 touched',
     milestone: 'M3',
     // §2.6's tooltip fade is `rate 26/s` on the game clock, integrated from
     // `dt` (never a CSS transition) — 20 steps at FIXED_DT (1/60 s) is
@@ -444,6 +456,11 @@ export const SHOTS = {
       // nothing to do with what this shot pins.
       actor.level = 20;
       if (actor.attributes) actor.attributes.strength = 40;
+      // UI-10 re-bless: a real name, not the archetype's own display name
+      // repeated twice in the sheet's header ("Ravager — Level 20 Ravager"
+      // read oddly before this line existed) — same dev-staging-mutation
+      // precedent as `actor.level`/`actor.attributes.strength` just above.
+      actor.name = 'Verrin';
 
       let uid = 50000;
       function makeItem(baseId, overrides) {
@@ -499,7 +516,13 @@ export const SHOTS = {
         ],
       });
 
-      ui.openInventory();
+      // UI-10 re-bless: `toggleInventory()` now pairs the character sheet
+      // (with its paperdoll) alongside the inventory — the real `I`-key
+      // production path (`09` §11.2), not a special-cased dev call. Net
+      // effect on a fresh, closed panel is identical to the old
+      // `openInventory()` call this replaces (both panels start closed, so
+      // one toggle opens them), plus the sheet now comes along.
+      ui.toggleInventory();
       // Both live paths this ticket's clause 4 covers, exercised together:
       // `setCompareHeld(true)` (the Ctrl-held path) AND `showTooltip`'s own
       // `compare` argument (the open-time path) both say "on" here, which
@@ -678,6 +701,104 @@ export const SHOTS = {
           col++;
           if (col >= COLS) { col = 0; row++; }
         }
+      }
+    },
+  },
+
+  // UI-9 — D-40: `12-testing.md:540`'s own M4 row ("the tree at 29
+  // allocated points"), owned by this ticket because no backlog row does
+  // (see this ticket's report). One of `12` §9.1's twelve pinned shots.
+  //
+  // ---------------------------------------------------------------------
+  // Why this setup calls `player.fixedUpdate` and `skills.allocate`
+  // directly, not `player.spendSkillPoint`
+  // ---------------------------------------------------------------------
+  // `player.spendSkillPoint(skillId)` is contracted
+  // (`02-api-contracts.md:1184`) but not implemented anywhere in
+  // `src/player/` (checked live; `src/player/` is out of this ticket's file
+  // grant regardless — see `src/ui/tree.js`'s own header for the full O-69-
+  // style guard `Tree#_onConfirmClick` already carries for this exact gap).
+  // This fixture is staged the same way `inventory_full`'s own setup stages
+  // its scene (direct calls into the ALREADY-CONSTRUCTED live subsystem
+  // graph, `ctx.get(id)`, never a fresh import — this file's own header,
+  // "must survive toString()+eval"):
+  //   1. `player.grantXp(1e9, 0)` then a direct `player.fixedUpdate(...)`
+  //      call — the REAL level-up path (PLYR-4's `ProgressTracker`, `03
+  //      -combat-math.md` §10.4's XP table): level 1 -> 30 in one pass,
+  //      `hudState().skillPoints` becomes 29 (`level - 1`, no class ever
+  //      pre-spends a starting point today — `CLASS_START_KIT` is PLYR-6,
+  //      M6, unimplemented). This is the "legitimate path" the ticket's
+  //      brief asks for, spelled out here: XP, not a hand-set `actor.level`.
+  //   2. `skills.allocate(actor, skillId)` x29, in ascending-tier order (so
+  //      `sunder`'s own prerequisite — `bloodletting >= 3` — is already
+  //      real by the time `sunder` is reached, the same ordering
+  //      `Tree#_onConfirmClick` uses for CONFIRM) — `skills.allocate` is
+  //      real, accepted, contracted (SKIL-1) and is exactly what the
+  //      missing `spendSkillPoint` would call internally.
+  //   3. `player._progress.skillPoints = 0` — a direct field write on the
+  //      live `ProgressTracker` (same "dev-mutation of the live graph"
+  //      tier as `inventory_full`'s own `actor.level = 20` line), standing
+  //      in for the bookkeeping half of the missing `spendSkillPoint` so
+  //      the header reads "0 remaining" rather than "29 remaining" over a
+  //      fully-allocated tree — disclosed here and in this ticket's report,
+  //      not silently faked.
+  // The distribution below sums to exactly 29, respects every `maxLevel`
+  // cap (20) and `sunder`'s own prerequisite: cleaving_strike 6,
+  // bloodletting 3, whirlwind 4, bloodthirst 2, sunder 3 (carnage = 18);
+  // ram_charge 3, shield_stance 3, war_cry 2, iron_skin 2, last_stand 1
+  // (unyielding = 11).
+  skill_tree_ravager: {
+    id: 'skill_tree_ravager',
+    description: "the skill tree screen at 29 allocated points across both Ravager trees (12-testing.md §9.1's own row, D-40) — the node lattice with every node's badge showing its real allocated level, the connector canvas's prerequisite edge (bloodletting -> sunder, satisfied) and its five synergy edges, cleaving_strike SELECTED and HOVERED (round 2, coordinator review: criterion 3 needs the detail card actually populated, not empty — describe()'s own N/N+1 pair is visible in the two mono columns) which also lights criterion 6's cleaving_strike -> whirlwind synergy edge at full alpha/thickness while every other edge dims to 12%, header reading 0 skill points remaining. player.spendSkillPoint is unimplemented (out of this ticket's file grant) — the 29 points are staged via real player.grantXp + player.fixedUpdate (the level 1->30 XP path) then real skills.allocate calls in tier order, with the header's remaining-points bookkeeping patched directly on the live ProgressTracker to read 0 — see this entry's own header for the full disclosure. KNOWN, EXPECTED placeholders: the detail card's DESCRIPTION/SYNERGIES/REQUIRES labels and the header's skill-points line read `[missing]tree.*` — O-70, none of those i18n keys exist in src/ui/i18n.js yet (out of this ticket's file grant); every one is routed through ui.t()'s documented fallback, never hardcoded English. When those keys land, THIS FRAME WILL LEGITIMATELY CHANGE — read that future diff as scheduled i18n work landing, not a regression",
+    milestone: 'M4',
+    steps: 1,
+    setup: (engine, ctx) => {
+      const ui = ctx.get('ui');
+      const player = ctx.get('player');
+      const skills = ctx.get('skills');
+      if (!ui || !player || !skills) return;
+
+      ui.setScreen('game');
+
+      player.grantXp(1e9, 0);
+      player.fixedUpdate(1 / 60, ctx); // processes the whole level 1 -> 30 climb in one pass (PLYR-4's ProgressTracker)
+
+      const actor = player.actor;
+      if (!actor) return;
+
+      const alloc = [
+        ['cleaving_strike', 6], ['ram_charge', 3], // tier 1
+        ['bloodletting', 3], ['whirlwind', 4], ['shield_stance', 3], // tier 6
+        ['bloodthirst', 2], ['war_cry', 2], ['iron_skin', 2], // tier 12
+        ['sunder', 3], ['last_stand', 1], // tier 18 — sunder after bloodletting, above
+      ];
+      for (const [skillId, count] of alloc) {
+        for (let i = 0; i < count; i++) skills.allocate(actor, skillId);
+      }
+      if (player._progress) player._progress.skillPoints = 0; // see this entry's own header, point 3
+
+      ui.toggleSkillTree();
+
+      // Round 2 (coordinator review): criterion 3 is "the detail card shows
+      // describe() at level N and N+1" — the panel's hardest feature and
+      // `describe`'s own reason to exist (SKIL-12) — and an unselected
+      // panel shows none of it. `__select`/`__hoverNode` are `tree.js`'s
+      // own dev-only escape hatches (double-underscore, `src/actors/
+      // index.js`'s `__archetypeVisuals` convention this file's header
+      // already leans on for `actor_ranker`) — reached here the same way
+      // this file's OTHER setups reach into the live, already-constructed
+      // object graph (`ctx.get('actors').__archetypeVisuals`, `ui._target
+      // ._targetActor` in `target.perf.test.js`), never a fresh import.
+      // `cleaving_strike` is the natural choice: criterion 6 is its
+      // synergy edge to `whirlwind`, so one selection demonstrates the
+      // detail card AND lights that edge in the same frame. Select and
+      // hover are independent flags in `tree.js` (hover drives connector
+      // focus; selection drives the detail card) — both are set here so
+      // the frame shows both effects at once, matching what a real player
+      // sees while the cursor sits on the node they just clicked.
+      if (ui._tree) {
+        ui._tree.__select('cleaving_strike');
+        ui._tree.__hoverNode('cleaving_strike');
       }
     },
   },

@@ -1249,6 +1249,16 @@ const DamagePacket = {
   manaOnHit:     0,         // flat
   manaReturnPercent: 0,     // % (Runeblade)
 
+  /** When true, the REQUESTER accounts for the attacker's rage credit for
+   *  this hit and `combat` skips R14(f)'s attacker-rage row. Resonance is
+   *  unaffected (it is per landed hit — 03 §2.4, 05 D-05-2), and so is the
+   *  defender's +4 per hit taken. Default false: combat credits, as always.
+   *  Exists because a CHANNEL earns at the actor's `attackInterval` cadence,
+   *  not per hit and not per step (05 §1.6 reading R2), so `skills` owns that
+   *  cadence outright — see 05 §12.1's infinite-`whirlwind` lock. Added by
+   *  SKIL-7 / PROGRESS D-57. */
+  requesterOwnsRageCredit: false,
+
   // ─── impulse ────────────────────────────────────────────────────────────
   knockback:        0,      // % chance
   knockbackDistance: 0.55,  // metres at mass 70 kg

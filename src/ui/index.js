@@ -60,9 +60,26 @@ import { Feedback } from './feedback.js';
 import { Tooltip } from './tooltip.js';
 import { Hotbar } from './hotbar.js';
 import { Inventory } from './inventory.js';
+import { Sheet } from './sheet.js';
+import { Target } from './target.js';
+import { Tree } from './tree.js';
 
 /** `02-api-contracts.md` §14's `setScreen` signature — verbatim. */
 const VALID_SCREENS = new Set(['boot', 'main_menu', 'character_create', 'game', 'death', 'reward_choice']);
+
+/** Defensive `ctx.get`/`ctx.peek` — duplicated per-module precedent
+ * (`inventory.js`/`hotbar.js`/`sheet.js` each carry their own copy); used
+ * here only by the O-78 pointer guard's `ctx.get('render')` lookup, which
+ * must never throw against a bare test ctx. */
+function safeGet(ctx, id) {
+  if (!ctx) return null;
+  if (typeof ctx.peek === 'function') return ctx.peek(id) || null;
+  if (typeof ctx.has === 'function' && typeof ctx.get === 'function') return ctx.has(id) ? ctx.get(id) : null;
+  if (typeof ctx.get === 'function') {
+    try { return ctx.get(id); } catch { return null; }
+  }
+  return null;
+}
 
 export class UiSystem {
   static id = 'ui';
@@ -79,6 +96,22 @@ export class UiSystem {
     this._tooltip = null; // UI-5's item tooltip (./tooltip.js), built in init()
     this._hotbar = null; // UI-3's hotbar/belt/prompt/toast/banner module (./hotbar.js), built in init()
     this._inventory = null; // UI-6's inventory panel/drag-drop module (./inventory.js), built in init()
+    this._sheet = null; // UI-10's character sheet + paperdoll module (./sheet.js), built in init()
+    this._target = null; // UI-8's target bar + buff strip module (./target.js), built in init()
+    this._tree = null; // UI-9's skill tree module (./tree.js), built in init()
+
+    // ---------------------------------------------------------------
+    // O-78, the `ui` half of `pointerOverUi` (`09` §11.4) — UI-10 is the
+    // first ticket that needs it (a panel that finally has real click
+    // targets — equipment slots — inside a game screen the world's own
+    // click-to-move also listens on). See `init()`'s
+    // `_installPointerGuard` and the `pointerOverUi` getter below for the
+    // full mechanism.
+    // ---------------------------------------------------------------
+    this._pointerOverUiLive = false;
+    this._swallowUntilFrame = -1;
+    this._localFrameCounter = 0;
+    this._pointerGuardHandler = null;
   }
 
   /**
@@ -173,6 +206,38 @@ export class UiSystem {
     // the toast column; `inventory.js` reaches it through this one bound
     // callback rather than reopening that file.
     this._inventory = new Inventory(ctx, layers.panels, layers.cursor, (key, params) => this.t(key, params), rng, (text, kind) => this.toast(text, kind));
+
+    // UI-10 (09 §15 U8) — the character sheet, its ten equipment slots and
+    // the uiScene paperdoll. Attached into `panels` — this ticket's own
+    // file-grant instruction ("attach into layers.panels. Do not
+    // restructure the layer stack"), the same layer `Inventory` above
+    // already uses (the left/right zones, 09 §3.3, never collide).
+    this._sheet = new Sheet(ctx, layers.panels, (key, params) => this.t(key, params), rng, (text, kind) => this.toast(text, kind));
+
+    // UI-8 (09 §15 U4) — the target health bar (all four rank layouts,
+    // ghost, segment ticks, affix chips, immunity marks, boss phase ticks)
+    // and the 24-entry buff/debuff strip. Attached into `layers.hud` — this
+    // ticket's own file-grant instruction, the same persistent-HUD-chrome
+    // layer `Hud`/`Hotbar` above already occupy (UI-9/UI-10 use
+    // `layers.panels` instead, see target.js's own header). Shares the same
+    // `rng` fork for the same one-fork-per-subsystem reason (unused today —
+    // see target.js's own header).
+    this._target = new Target(ctx, layers.hud, (key, params) => this.t(key, params), rng);
+
+    // UI-9 (09 §15 U10) — the skill tree screen: the node lattice, the
+    // connector canvas, the detail card, provisional allocation/confirm/
+    // revert and the close-with-pending dialog. Attached into `layers.panels`
+    // — this ticket's own file-grant instruction, the same layer
+    // `Inventory`/`Sheet` above already occupy. Shares the same `rng` fork
+    // for the same one-fork-per-subsystem reason (unused today — see
+    // tree.js's own header).
+    this._tree = new Tree(ctx, layers.panels, (key, params) => this.t(key, params), rng, (text, kind) => this.toast(text, kind));
+
+    // O-78 — the `ui` half of `pointerOverUi` (09 §11.4). Installed once
+    // here, after every panel module above has had a chance to build its
+    // own DOM (not that installation order matters — this only reads
+    // `event.target`/`this._root` at dispatch time, never at install time).
+    this._installPointerGuard(ctx);
   }
 
   /**
@@ -183,11 +248,20 @@ export class UiSystem {
    * @param {object} ctx
    */
   lateUpdate(dt, ctx) {
+    // O-78's swallow-guard clock — see `pointerOverUi`'s getter below.
+    // Incremented unconditionally, every real engine frame, so the guard
+    // has a monotonic "frame" to hold against even under a bare test ctx
+    // with no `render` subsystem (the fallback `_currentFrame()` uses this
+    // instead of `render.frameIndex` when `render` is absent).
+    this._localFrameCounter++;
     if (this._hud) this._hud.update(dt, ctx);
     if (this._feedback) this._feedback.update(dt, ctx);
     if (this._tooltip) this._tooltip.update(dt, ctx);
     if (this._hotbar) this._hotbar.update(dt, ctx);
     if (this._inventory) this._inventory.update(dt, ctx);
+    if (this._sheet) this._sheet.update(dt, ctx);
+    if (this._target) this._target.update(dt, ctx);
+    if (this._tree) this._tree.update(dt, ctx);
   }
 
   /**
@@ -257,6 +331,17 @@ export class UiSystem {
     // cancels any in-progress drag (`items.returnCursor()`), so nothing is
     // left orphaned on the cursor across the screen change.
     if (this._inventory && screenId !== 'game') this._inventory.close();
+    // UI-10: same gating principle — the character sheet (and its uiScene
+    // paperdoll, hidden via `Sheet#close()`) must not keep drawing over a
+    // non-`game` screen either.
+    if (this._sheet && screenId !== 'game') this._sheet.close();
+    // UI-8: the target bar/buff strip is the same "persistent HUD chrome,
+    // not a modal" class as the plinth/hotbar — same gating principle.
+    if (this._target) this._target.setVisible(screenId === 'game');
+    // UI-9: same gating principle — a screen change force-closes the tree
+    // panel (`close(true)`, bypassing the close-with-pending dialog: this
+    // is teardown, not a user asking to leave with unconfirmed points).
+    if (this._tree && screenId !== 'game') this._tree.close(true);
   }
 
   /** Removes every DOM node this subsystem created (`ARCHITECTURE.md` rule
@@ -276,6 +361,13 @@ export class UiSystem {
     this._hotbar = null;
     if (this._inventory) this._inventory.dispose();
     this._inventory = null;
+    if (this._sheet) this._sheet.dispose();
+    this._sheet = null;
+    if (this._target) this._target.dispose();
+    this._target = null;
+    if (this._tree) this._tree.dispose();
+    this._tree = null;
+    this._removePointerGuard();
     if (this._root) this._root.remove();
     this._root = null;
     this._layers = null;
@@ -314,6 +406,18 @@ export class UiSystem {
    */
   setCompareHeld(on) {
     if (this._tooltip) this._tooltip.setCompareHeld(on);
+  }
+
+  /**
+   * `02-api-contracts.md:1277`: `setTargetBar(actor:Actor|null) => void`.
+   * UI-8 (`09 §15` U4, `09 §4.5`) — delegates to `./target.js`. `player`
+   * (not yet wired) is this method's real caller; the 1.2 s
+   * clear-after-death/leave delay named in `09 §4.5` is `player`'s own job,
+   * not this method's — see `target.js#setTargetBar`'s own header.
+   * @param {object|null} actor
+   */
+  setTargetBar(actor) {
+    if (this._target) this._target.setTargetBar(actor);
   }
 
   /**
@@ -376,25 +480,167 @@ export class UiSystem {
     if (this._inventory) this._inventory.close();
   }
 
-  /** `02-api-contracts.md:1274`: `toggleInventory() => void`. */
+  /**
+   * `02-api-contracts.md:1274`: `toggleInventory() => void`. `09 §11.2`'s
+   * `I` binding (`toggle_inventory`) is documented as opening "the
+   * character sheet AND the inventory as a pair" — that pairing is this
+   * method's own effect (not something `player`, which is out of this
+   * ticket's file grant and has no `I`/`C` key wiring landed yet, does by
+   * calling two separate `ui` methods): after toggling the inventory panel,
+   * the sheet is snapped to match its new open/closed state. `C`
+   * (`toggleCharacterSheet`, below) stays completely independent — pressing
+   * it after `I` closes only the sheet, matching "C opens the sheet alone"
+   * — and a later `I` still re-syncs the sheet to the inventory's own
+   * state, so the pair never gets stuck out of step.
+   */
   toggleInventory() {
     if (this._inventory) this._inventory.toggle();
+    if (this._sheet) this._sheet.setVisible(this._inventory ? this._inventory.isOpen() : false);
+  }
+
+  /**
+   * `02-api-contracts.md` §14: `toggleCharacterSheet() => void` — UI-10's
+   * own new row (this ticket). `09 §11.2`'s `C` binding
+   * (`toggle_character`): "character sheet only" — toggles the sheet in
+   * isolation, never touching the inventory panel's own state (contrast
+   * `toggleInventory` above, which pairs them).
+   */
+  toggleCharacterSheet() {
+    if (this._sheet) this._sheet.toggle();
+  }
+
+  /** `02-api-contracts.md:1282`: `openSkillTree() => void`. UI-9 —
+   * delegates to `./tree.js`. */
+  openSkillTree() {
+    if (this._tree) this._tree.open();
+  }
+
+  /** `02-api-contracts.md:1282`: `closeSkillTree() => void`. */
+  closeSkillTree() {
+    if (this._tree) this._tree.close();
+  }
+
+  /** `02-api-contracts.md` §14: `toggleSkillTree() => void` — UI-9's own
+   * new row (this ticket). `09 §11.2`'s skill-tree binding toggles the
+   * panel in isolation, the same shape `toggleCharacterSheet` above uses. */
+  toggleSkillTree() {
+    if (this._tree) this._tree.toggle();
   }
 
   /**
    * `02-api-contracts.md` §14: `debugState(name) => void` — dev/test-only
    * staging, never called from real gameplay. Built incrementally, one
-   * `mode` per ticket (`docs/PROGRESS.md` D-23): `'combat'` (this ticket,
-   * `09 §15` U1) delegates to `./hud.js#debugState`; `'inventory'` (UI-7),
-   * `'tree'` (UI-9, M4) and `'vendor'` (UI-12, M6) each add one more `if`
-   * below, against their own module, without touching this one's branch —
-   * `static deps` and every other line of this file are untouched by
-   * adding a mode here.
-   * @param {'combat'|'inventory'|'tree'|'vendor'|'clean'} name
+   * `mode` per ticket (`docs/PROGRESS.md` D-23): `'combat'` (UI-2,
+   * `09 §15` U1) delegates to `./hud.js#debugState`; `'inventory'` (UI-7)
+   * opens the inventory panel; `'character'` (this ticket, UI-10) opens the
+   * character sheet — `'tree'` (UI-9, M4) and `'vendor'` (UI-12, M6) still
+   * add their own `if` below, against their own module, without touching
+   * this one's branch. NOTE: `02-api-contracts.md`'s own `debugState` row
+   * types `name` as `'combat'|'inventory'|'tree'|'vendor'|'clean'` and does
+   * not list `'character'` — that table cell needs a maintainer edit this
+   * ticket cannot make (rule 7: "Do not edit `02-api-contracts.md`");
+   * flagged in this ticket's report. `debugState` never validates/throws on
+   * an unlisted value (every branch here is a silent no-op otherwise), so
+   * accepting one more string is not a contract violation today, only a
+   * documentation gap upstream.
+   *
+   * UI-8 (this ticket) adds five more: `'target_normal'`/`'target_minion'`/
+   * `'target_champion'`/`'target_unique'`/`'target_boss'` stage the target
+   * bar at each of `09 §4.5`'s four rank layouts via
+   * `./target.js#__debugStageRank` — D-41's hand-built-record path, since
+   * `ai.debugStage('champion')`/`('boss')` (the acceptance text's own
+   * literal wording) is unimplemented (`src/ai/index.js:16`) and champion/
+   * boss rank promotion is AI-8 (M6). Also not in `02-api-contracts.md`'s
+   * `debugState` row — same documentation gap as `'character'` above,
+   * flagged in this ticket's report alongside it.
+   * @param {'combat'|'inventory'|'tree'|'vendor'|'clean'|'character'|'target_normal'|'target_minion'|'target_champion'|'target_unique'|'target_boss'} name
    */
   debugState(name) {
     if (name === 'combat' && this._hud) this._hud.debugState('combat');
     if (name === 'inventory' && this._inventory) this._inventory.open();
+    if (name === 'character' && this._sheet) this._sheet.open();
+    // UI-9 (this ticket) — 'tree' is already in `02-api-contracts.md`'s own
+    // `debugState` type union (see this method's own doc comment above);
+    // no doc gap to report for this one, unlike 'character'/'target_*'.
+    if (name === 'tree' && this._tree) this._tree.open();
+    if (typeof name === 'string' && name.indexOf('target_') === 0 && this._target) {
+      this._target.__debugStageRank(name.slice('target_'.length));
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // O-78 — the `ui` half of `pointerOverUi` (`09` §11.4). `player` (a
+  // different, not-yet-landed ticket's file) is the only reader
+  // (`fixedUpdate`, before honouring a latched click); this subsystem is
+  // only the writer.
+  // -------------------------------------------------------------------
+
+  /**
+   * Installs ONE `document`-level `pointerdown`/`pointermove` listener in
+   * the CAPTURE phase (`09` §11.4 point 2, verbatim: `pointerOverUi =
+   * eventTarget is a Node && uiRoot.contains(eventTarget) &&
+   * eventTarget.closest('[data-ui-solid]') !== null`) — no
+   * `elementFromPoint`, no `getBoundingClientRect`, `event.target` is
+   * already the hit result. Defensive against the Node DOM shim
+   * (`./util.js`'s `resolveDocument`), which implements neither
+   * `addEventListener` nor `Element#closest` — the same "degrade
+   * gracefully under Node" discipline every other `ui` module's own event
+   * binding already follows (`inventory.js#_bindEvents`).
+   */
+  _installPointerGuard(ctx) {
+    const doc = this._doc;
+    if (!doc || typeof doc.addEventListener !== 'function') return;
+    const handler = (e) => this._onGuardPointerEvent(e, ctx);
+    doc.addEventListener('pointerdown', handler, true);
+    doc.addEventListener('pointermove', handler, true);
+    this._pointerGuardHandler = handler;
+    this._pointerGuardDoc = doc;
+  }
+
+  _removePointerGuard() {
+    if (this._pointerGuardHandler && this._pointerGuardDoc && typeof this._pointerGuardDoc.removeEventListener === 'function') {
+      this._pointerGuardDoc.removeEventListener('pointerdown', this._pointerGuardHandler, true);
+      this._pointerGuardDoc.removeEventListener('pointermove', this._pointerGuardHandler, true);
+    }
+    this._pointerGuardHandler = null;
+    this._pointerGuardDoc = null;
+  }
+
+  _onGuardPointerEvent(e, ctx) {
+    const target = e && e.target;
+    const solid = !!(target
+      && this._root
+      && typeof this._root.contains === 'function'
+      && this._root.contains(target)
+      && typeof target.closest === 'function'
+      && target.closest('[data-ui-solid]') !== null);
+    this._pointerOverUiLive = solid;
+    // `09` §11.4 point 4, "the close-click guard": ANY solid pointerdown
+    // (which includes a close button — it lives inside the panel, which
+    // itself carries `data-ui-solid`, `09` point 1's "panels and everything
+    // inside them") arms one extra frame of `pointerOverUi = true` beyond
+    // the click itself. This is what stops the classic bug the spec names:
+    // dismissing a panel walks the character into the pointer's position,
+    // because the SAME pointerdown that closed the panel would otherwise
+    // resolve `pointerOverUi = false` one frame later once the panel's gone.
+    if (solid && e && e.type === 'pointerdown') {
+      this._swallowUntilFrame = this._currentFrame(ctx) + 2;
+    }
+  }
+
+  _currentFrame(ctx) {
+    const render = safeGet(ctx || this._ctx, 'render');
+    if (render && typeof render.frameIndex === 'number') return render.frameIndex;
+    return this._localFrameCounter;
+  }
+
+  /** `02-api-contracts.md` §14: `pointerOverUi` property → `boolean`,
+   * `Fixed: Y` — `player.fixedUpdate` reads this before honouring a
+   * latched click (`11-flows.md` §3.2, rule 1). Live hit-test OR the
+   * 2-frame close-click hold, whichever is true. */
+  get pointerOverUi() {
+    if (this._pointerOverUiLive) return true;
+    return this._currentFrame(this._ctx) < this._swallowUntilFrame;
   }
 
   // -------------------------------------------------------------------
@@ -409,5 +655,20 @@ export class UiSystem {
    * the read the acceptance criterion needs today). */
   __nodeCount() {
     return this._root ? countNodes(this._root) : 0;
+  }
+
+  /** Test/dev-only: drives the exact `pointerOverUi` guard code path
+   * (`_onGuardPointerEvent`) a real captured `pointerdown`/`pointermove`
+   * would, without a real DOM listener — the Node shim (`./util.js`)
+   * implements neither `addEventListener` nor `Element#closest`, so the
+   * real listener installed by `_installPointerGuard` never fires under
+   * `node --test`. Same "no real DOM under Node" problem
+   * `inventory.js`'s own `__simulatePointerDown`/`__simulatePointerMove`
+   * solve for that module; this is the same tier for O-78's guard.
+   * @param {'pointerdown'|'pointermove'} type
+   * @param {object|null} target - a node (real or Node-shim) to hit-test.
+   */
+  __simulatePointerGuardEvent(type, target) {
+    this._onGuardPointerEvent({ type, target }, this._ctx);
   }
 }

@@ -132,6 +132,11 @@ test('a moving order still steps the actor every one of the six fixed steps', as
   const { engine, ctx } = await bootGame();
   const player = ctx.get('player');
   const actor = player.actor;
+  // Settle the 1.00 s spawn window (08 §5.5, 06-monsters-ai.md:1731) through
+  // the public contract — spawning -> idle is a legal transition
+  // (src/actors/data/states.js) — so this test's own six-step budget is
+  // about the movement ladder, not a redundant re-proof of ACTR-21's timer.
+  ctx.get('actors').setState(actor, 'idle');
 
   clickAt(ctx.input, 900, 200);
   engine.frame(FIXED_DT); // latch
@@ -148,6 +153,9 @@ test('fixedUpdate never reads ctx.input — a frame with ctx.input reading forbi
   const { engine, ctx } = await bootGame();
   const player = ctx.get('player');
   const actor = player.actor;
+  // Settle the 1.00 s spawn window (08 §5.5, 06-monsters-ai.md:1731) through
+  // the public contract — see the identical note on the previous test.
+  ctx.get('actors').setState(actor, 'idle');
 
   clickAt(ctx.input, 900, 200);
   engine.frame(FIXED_DT); // legitimate latch, through update() — allowed to read ctx.input
@@ -242,6 +250,9 @@ test('movement goes through actors.moveTo, never a direct actor.x/z write', asyn
   const player = ctx.get('player');
   const actors = ctx.get('actors');
   const actor = player.actor;
+  // Settle the 1.00 s spawn window (08 §5.5, 06-monsters-ai.md:1731) through
+  // the public contract — see the identical note in the earlier tests above.
+  actors.setState(actor, 'idle');
 
   let moveToCalls = 0;
   const realMoveTo = actors.moveTo.bind(actors);
@@ -342,6 +353,9 @@ test('the camera follows the player once it drifts past the dead zone', async ()
 test('a sub-dead-zone walk does not move the camera at all', async () => {
   const { engine, ctx } = await bootGame();
   const player = ctx.get('player');
+  // Settle the 1.00 s spawn window (08 §5.5, 06-monsters-ai.md:1731) through
+  // the public contract — see the identical note in the earlier tests above.
+  ctx.get('actors').setState(player.actor, 'idle');
 
   // 0.5 m is comfortably past the 0.25 m arriveRadius (so the actor
   // actually walks several steps, not an instant no-op arrival) yet

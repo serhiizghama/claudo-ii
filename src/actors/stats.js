@@ -73,7 +73,22 @@
  * `.maxResonance` like any other flat term (`01` §3.2: `add` aggregation,
  * caps 200/8) — not a second, competing cap. A class with no secondary
  * resource contributes 0 to the one it lacks, same as any other unused
- * stat; it is not "uncapped", it is simply absent from that class's base. */
+ * stat; it is not "uncapped", it is simply absent from that class's base.
+ *
+ * `manaReturnPercent` — SKIL-5's O-84/D-53 named micro-scope, and NOTHING
+ * else in this file was touched for it. `03-combat-math.md:223` ("Base
+ * `manaReturnPercent` for the Runeblade class is **8**") is the only base
+ * this table gives for any class — Ravager and Emberwright are given
+ * NOTHING (D-53: "if the spec does not give it, give them nothing and say
+ * so" — not invented as some other number). `0` here is not an invented
+ * figure; it is the `add`-aggregation identity element, the same role `0`
+ * already plays for `baseRage`/`baseResonance` on the two classes that
+ * lack those resources, immediately above. Before this, `CLASS_TABLE` had
+ * no `manaReturnPercent` row for any class at all, so a really-composed
+ * Runeblade read `manaReturnPercent = 0` — SKIL-2 and SKIL-4 could only
+ * reproduce `05` §11.3 / E13 by passing the value in by hand
+ * (`setSourceLayer`), never by a real `composeStats()` run. See this
+ * ticket's report. */
 const CLASS_TABLE = Object.freeze({
   ravager: Object.freeze({
     baseLife: 55, lifePerVit: 4.0, lifePerLevel: 2.0,
@@ -82,7 +97,7 @@ const CLASS_TABLE = Object.freeze({
     startStr: 30, startDex: 20, startVit: 25, startEne: 10,
     classBaseAR: 30,
     manaRegenRate: 0.020, lifeRegenRate: 0.006,
-    baseRage: 100, baseResonance: 0,
+    baseRage: 100, baseResonance: 0, manaReturnPercent: 0,
   }),
   emberwright: Object.freeze({
     baseLife: 40, lifePerVit: 2.0, lifePerLevel: 1.0,
@@ -91,7 +106,7 @@ const CLASS_TABLE = Object.freeze({
     startStr: 15, startDex: 25, startVit: 15, startEne: 35,
     classBaseAR: 0,
     manaRegenRate: 0.040, lifeRegenRate: 0.006,
-    baseRage: 0, baseResonance: 0,
+    baseRage: 0, baseResonance: 0, manaReturnPercent: 0,
   }),
   runeblade: Object.freeze({
     baseLife: 45, lifePerVit: 3.0, lifePerLevel: 1.5,
@@ -100,7 +115,7 @@ const CLASS_TABLE = Object.freeze({
     startStr: 22, startDex: 25, startVit: 20, startEne: 22,
     classBaseAR: 25,
     manaRegenRate: 0.030, lifeRegenRate: 0.006,
-    baseRage: 0, baseResonance: 3,
+    baseRage: 0, baseResonance: 3, manaReturnPercent: 8, // 03 §2.4 — O-84/D-53
   }),
 });
 
@@ -112,7 +127,7 @@ const ZERO_CLASS = Object.freeze({
   startStr: 0, startDex: 0, startVit: 0, startEne: 0,
   classBaseAR: 0,
   manaRegenRate: 0, lifeRegenRate: 0,
-  baseRage: 0, baseResonance: 0,
+  baseRage: 0, baseResonance: 0, manaReturnPercent: 0,
 });
 
 // ---------------------------------------------------------------------------
@@ -294,6 +309,7 @@ function createEmptySources() {
     base: {
       strength: 0, dexterity: 0, vitality: 0, energy: 0,
       lifeRegenPercent: 0, manaRegenPercent: 0, maxRage: 0, maxResonance: 0,
+      manaReturnPercent: 0, // O-84/D-53 — Runeblade class base only, see CLASS_TABLE's own comment
     },
     allocated: { strength: 0, dexterity: 0, vitality: 0, energy: 0 },
     equipment: {},
@@ -464,6 +480,7 @@ export function composeStats(actor) {
   // (200/8) by the normal clamp() pass, not clamped to this base value.
   base.maxRage = classRow.baseRage;
   base.maxResonance = classRow.baseResonance;
+  base.manaReturnPercent = classRow.manaReturnPercent; // O-84/D-53 micro-scope — 03 §2.4
   applyLayer(block, base);
   steps++;
 

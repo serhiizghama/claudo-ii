@@ -62,7 +62,10 @@ function approx(got, expected, msg) {
 // ---------------------------------------------------------------------------
 
 /** A minimal StatBlock covering every field resolve.js reads. Every test
- * below overrides only what it cares about. */
+ * below overrides only what it cares about. `ccReduction` added for
+ * CMBT-9/D-55 (defect B): R14(c)'s riders now read it (`ccMultiplierOf`,
+ * mirroring `status.js`'s own formula) for every non-DR-chain,
+ * non-exempt-status rider and for the DR-chain statuses themselves. */
 function makeStats(overrides = {}) {
   return {
     defense: 0, dexterity: 0, blockChance: 0, dodgeChance: 0,
@@ -74,7 +77,7 @@ function makeStats(overrides = {}) {
     magicResist: 0, maxMagicResist: 75,
     magicDamageReduceFlat: 0,
     maxLife: 100000, maxMana: 100000,
-    thorns: 0,
+    thorns: 0, ccReduction: 0,
     ...overrides,
   };
 }
@@ -281,7 +284,10 @@ test('E13: full resolveDamage() reproduces every row of the worked example to 1e
   setSourceLayer(source, 'equipment', {
     enhancedDamage: 35, // "enhancedDamage 35"
     lightMin: 12, lightMax: 25, // blade_seal's own flatDamage, standing in for the skill layer (05-skills.md not built yet — see 01 §4.1's own equipment/skills split)
-    manaReturnPercent: 8, // Runeblade's own stat
+    // manaReturnPercent is NOT hand-set here any more: O-84/D-53 (SKIL-5)
+    // added the Runeblade class-base 8 to CLASS_TABLE
+    // (src/actors/stats.js), so composeStats()'s own `base` layer supplies
+    // it now (03-combat-math.md:223). Setting it here too would double it.
   });
   composeStats(source);
   source.life = 100; source.mana = 20;
@@ -616,6 +622,103 @@ test('resolveDamage: poison seed and onHitStatus riders call applyStatus with th
   assert.notEqual(out.statusApplied & (1 << 1), 0, 'poisoned bit set');
   assert.notEqual(out.statusApplied & (1 << 0), 0, 'burning bit set');
   packetPool.release(packet);
+});
+
+// ---------------------------------------------------------------------------
+// CMBT-9/D-55, defect B — R14(c)'s riders now go through the SAME
+// diminishing-returns chain `combat.applyStatusFromPacket()` (CMBT-4) uses,
+// instead of applying `rider.magnitude`/`rider.duration` verbatim. Before
+// this fix, a `stunned`/`frozen` status applied through resolveDamage()'s
+// own default path (a monster's attack, any caller that never routes
+// through `applyStatusFromPacket`) skipped the CC lock `05 §12.7` relies on
+// entirely — this file's own header (Cross-subsystem gap 1) already
+// documented the guarded, no-op-until-wired call, but said nothing about
+// the DR chain because the DR chain did not exist here at all.
+// ---------------------------------------------------------------------------
+
+test('resolveDamage: successive stunned riders on the default path scale x1, x0.6, x0.36, x0.216, and a 5th within the 6.0s window is refused with a forced immunity window (03 §7.7, the CC lock 05 §12.7 relies on)', () => {
+  const target = makeActor({ team: 1, life: 100000, rank: 'normal', ccImmuneUntil: 0, stunChain: 0, stunChainAt: 0 });
+  const calls = [];
+  const actorsSystem = { applyStatus(actor, spec) { calls.push({ status: spec.status, duration: spec.duration }); return { status: spec.status }; } };
+
+  const fire = (step) => {
+    const packet = makePacket({ team: 0, attackRating: 0, physMin: 0, physMax: 0, critChance: 0, onHitCount: 1 });
+    packet.onHitStatus[0].status = 'stunned';
+    packet.onHitStatus[0].chance = 100;
+    packet.onHitStatus[0].duration = 2.45; // ram_charge level 20's own stun duration (05 §12.7)
+    packet.onHitStatus[0].magnitude = 0;
+    packet.onHitStatus[0].stacks = 1;
+    const env = makeEnv({ actorsSystem, rng: makeMockRng(0.01), step });
+    resolveDamage(packet, target, env, blankResult());
+    packetPool.release(packet);
+  };
+
+  for (let i = 0; i < 5; i++) fire(0); // worst case: zero time passes between applications
+
+  assert.equal(calls.length, 4, '5th application within the window is refused outright — no applyStatus call at all');
+  approx(calls[0].duration, 2.45, 'x1');
+  approx(calls[1].duration, 1.47, 'x0.6');
+  approx(calls[2].duration, 0.882, 'x0.36');
+  approx(calls[3].duration, 0.5292, 'x0.216');
+
+  const total = calls.reduce((s, c) => s + c.duration, 0);
+  approx(total, 5.3312, '05 §12.7\'s own worked example total (2.45+1.47+0.88+0.53≈5.33s), reproduced through resolveDamage()');
+
+  assert.equal(target.ccImmuneUntil, 6.0 * 60, 'the 5th refusal opens a real, forced 6.0s stun-immunity window — permanent CC is impossible');
+
+  // And once that window elapses, a fresh application is accepted again at x1 —
+  // proving the lock is a temporary, forced-free window, never a permanent one.
+  fire(target.ccImmuneUntil);
+  assert.equal(calls.length, 5);
+  approx(calls[4].duration, 2.45, 'chain restarts at x1 once immunity lapses');
+});
+
+test('resolveDamage: a stunned rider on a boss target takes STUNNED_BOSS_DURATION_MULT on top of the DR chain multiplier', () => {
+  const target = makeActor({ team: 1, life: 100000, rank: 'boss', ccImmuneUntil: 0, stunChain: 0, stunChainAt: 0 });
+  const calls = [];
+  const actorsSystem = { applyStatus(actor, spec) { calls.push({ duration: spec.duration }); return { status: spec.status }; } };
+
+  const packet = makePacket({ team: 0, attackRating: 0, physMin: 0, physMax: 0, critChance: 0, onHitCount: 1 });
+  packet.onHitStatus[0].status = 'stunned';
+  packet.onHitStatus[0].chance = 100;
+  packet.onHitStatus[0].duration = 2.45;
+  packet.onHitStatus[0].magnitude = 0;
+  packet.onHitStatus[0].stacks = 1;
+  const env = makeEnv({ actorsSystem, rng: makeMockRng(0.01), step: 0 });
+  resolveDamage(packet, target, env, blankResult());
+  packetPool.release(packet);
+
+  approx(calls[0].duration, 2.45 * 0.25, '03 §7.7: "Boss: duration x 0.25" — STUNNED_BOSS_DURATION_MULT, on the DR chain\'s own x1 first slot');
+});
+
+test('resolveDamage: a non-exempt, non-DR-chain rider (chilled) now takes the ccReduction adjustment the inline loop used to skip entirely; the three exempt statuses (burning/poisoned/bleeding) still do not', () => {
+  const target = makeActor({ team: 1, life: 100000, stats: makeStats({ ccReduction: 40 }) });
+  const calls = [];
+  const actorsSystem = { applyStatus(actor, spec) { calls.push({ status: spec.status, duration: spec.duration }); return { status: spec.status }; } };
+
+  const packet = makePacket({
+    team: 0, attackRating: 0, physMin: 0, physMax: 0, critChance: 0, onHitCount: 2,
+  });
+  packet.onHitStatus[0].status = 'chilled';
+  packet.onHitStatus[0].chance = 100;
+  packet.onHitStatus[0].duration = 5.0;
+  packet.onHitStatus[0].magnitude = 30;
+  packet.onHitStatus[0].stacks = 1;
+  packet.onHitStatus[1].status = 'burning';
+  packet.onHitStatus[1].chance = 100;
+  packet.onHitStatus[1].duration = 3.0;
+  packet.onHitStatus[1].magnitude = 5;
+  packet.onHitStatus[1].stacks = 1;
+
+  const env = makeEnv({ actorsSystem, rng: makeMockRng(0.01), step: 0 });
+  resolveDamage(packet, target, env, blankResult());
+  packetPool.release(packet);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].status, 'chilled');
+  approx(calls[0].duration, 5.0 * (1 - 40 / 100), 'chilled is ccReduction-adjusted: 5.0 x (1 - 0.40) = 3.0');
+  assert.equal(calls[1].status, 'burning');
+  assert.equal(calls[1].duration, 3.0, 'burning is CC_REDUCTION_EXEMPT — duration fixed by the applying skill, untouched');
 });
 
 // ---------------------------------------------------------------------------

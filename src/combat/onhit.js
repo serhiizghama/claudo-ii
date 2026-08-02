@@ -188,6 +188,183 @@ function clamp(v, lo, hi) {
 }
 
 // ---------------------------------------------------------------------------
+// CMBT-8 / D-51 — R1's per-ACTION rage guard. Attacker RAGE only; Resonance
+// stays per-LANDED-HIT (D-05-2's exact identity — see the Resonance credit
+// site in `applyOnHitEconomy` below, deliberately NOT gated by this).
+// ---------------------------------------------------------------------------
+// Before this fix, the attacker-rage block below ran once per
+// `combat:hit-request` this subsystem resolved, with no notion of "action"
+// at all. A cone/nova that resolves N hit-requests for the SAME cast (e.g.
+// `cleaving_strike`, SKIL-3 — a 4-body cone) credited rage N times.
+// `05-skills.md` §1.6 R1 is explicit this is wrong: "one award per action,
+// credited on the first landed hit" — per-target awards make `whirlwind`
+// self-funding at 3 targets and `cleaving_strike` earn far more rage/s than
+// it costs (`05` §12.1).
+//
+// Action identity: `(source.generation, source.actionSeq)`.
+// `src/actors/action.js#beginAction` bumps `actionSeq` exactly once per
+// action and the field lives on the Actor record for its whole life;
+// `generation` is the same recycle guard `src/actors/pool.js` already bumps
+// on every release. The pair is packed into ONE float, following
+// `src/skills/cost.js#encodeCooldownStamp`'s own precedent verbatim
+// (`generation * SCALE + counter`) rather than inventing a third pattern for
+// the identical shape of problem — `ARCHITECTURE.md` rule 2 forbids
+// importing that constant/function directly (`skills` is a different
+// subsystem), so both are redeclared here, the same discipline this file
+// already applies to `addResourceClamped`/`isLikelyMeleeAttack`.
+//
+// A basic attack that never goes through `beginAction` at all (today: only
+// `ai/brains/melee.js`'s `bone_ranker` swing — that file's own header states
+// it "never touches `actor.state`" and never calls `beginAction`, so
+// `actor.actionSeq` never moves off its pool-reset default) still needs to
+// award once per landed swing, and there is no `actionSeq` change to key a
+// guard on for it. `source.actionId` is the signal that tells the two cases
+// apart: `pool.js` defaults it to `null` and NOTHING else ever writes it
+// except `beginAction`/`cancelAction`/`advanceAction` (`src/actors/`) — so it
+// is `null` for the entire life of an actor that never begins a tracked
+// action, and it is the action/skill id string for the WHOLE
+// `windup`/`active`/`recover` span of a real one (cleared back to `null`
+// only once `advanceAction` finishes `recover` — i.e. still set at the
+// moment a cone/nova's hitframe resolves every one of its targets).
+//
+// D-52 (this file, SKIL-7's own finding, corrected here): the ORIGINAL
+// decision — `source.actionId === null` -> award UNCONDITIONALLY, every
+// call, no guard state touched at all — was wrong. It was written on the
+// assumption that "every such landed hit today is already its own singleton
+// action, so per-hit and per-action already coincide" (true for a lone
+// `bone_ranker` swing, one target). It stops being true the moment ANY
+// actionId-less attacker resolves more than one landed hit in the SAME
+// fixed step — exactly `05-skills.md` §12.1's own bug, one layer down:
+// `whirlwind` (SKIL-7) never routes through `beginAction` at all (a channel
+// cannot — see `src/skills/channel.js`'s own header), so its 0.55 s tick
+// against N targets credited the attacker N times per tick under the old
+// rule. CMBT-8's own report already flagged this exact scenario as an open
+// question and left it unresolved; it is resolved here.
+//
+// Fix: when `actionId === null`, key the guard on `(generation, step)`
+// instead — `env.step`, `ctx.time.step`'s own monotonic fixed-step index
+// (`ARCHITECTURE.md`'s own clock, never re-derived). One award per
+// SIMULATION STEP for an actor with no tracked action, not one award per
+// landed hit — a `bone_ranker`'s own single-target swing still gets
+// credited exactly as before (one hit, one step, one award), and a
+// multi-target hit resolved entirely within one step (a channel's tick, or
+// any future actionId-less multi-target attack) now credits exactly once,
+// not once per target. `encodeActionRageStamp`'s own packing is reused
+// verbatim for the `(generation, step)` pair — it was already generic over
+// "the second integer," never specifically `actionSeq`.
+//
+// This still does not give a CHANNEL the R2 cadence it actually needs
+// (`attackInterval`, neither per-hit nor per-step) — `doRageAward`'s own
+// `requesterOwnsRageCredit` packet field (below) is what lets `skills` opt
+// a channel's packets OUT of this guard entirely and own the credit itself,
+// per CMBT-8's own note: "R2's own cadence is `skills`' explicit job... not
+// this guard's."
+const ACTION_RAGE_SCRATCH_CAPACITY = 256; // src/actors/action.js's own
+// `scratchCapacity` precedent: comfortably above 01-data-model.md's
+// documented `q.maxActors` ceiling (220, +8 StatBlock headroom) — grown
+// lazily below if a real `poolIndex` ever exceeds it.
+const ACTION_RAGE_GEN_SCALE = 2 ** 32; // src/skills/cost.js#COOLDOWN_GEN_SCALE's
+// own precedent, redeclared (not imported — ARCHITECTURE.md rule 2) for the
+// identical (generation, counter) packing problem.
+
+let actionRageCapacity = ACTION_RAGE_SCRATCH_CAPACITY;
+let lastRageActionStamp = new Float64Array(actionRageCapacity).fill(-1);
+
+function ensureActionRageCapacity(poolIndex) {
+  if (poolIndex < actionRageCapacity) return;
+  const grown = Math.max(poolIndex + 1, actionRageCapacity * 2);
+  const next = new Float64Array(grown).fill(-1);
+  next.set(lastRageActionStamp);
+  lastRageActionStamp = next;
+  actionRageCapacity = grown;
+}
+
+/** Packs `(generation, counter)` — see the block comment above. `counter` is
+ * `actionSeq` for a real tracked action, `step` for an actionId-less one
+ * (D-52) — the packing itself is generic over "the second integer", never
+ * specifically `actionSeq`. Mirrors `src/skills/cost.js#encodeCooldownStamp`
+ * exactly, redeclared rather than imported (cross-subsystem import ban).
+ * @param {number} generation
+ * @param {number} counter
+ * @returns {number}
+ */
+export function encodeActionRageStamp(generation, counter) {
+  return generation * ACTION_RAGE_GEN_SCALE + counter;
+}
+
+/**
+ * R1's per-action guard for the ATTACKER's rage credit ONLY — never call
+ * this for Resonance or the defender's rage. Returns `true` (and records the
+ * credit as taken) the first time it is called for a given identity; `false`
+ * on every later call for the SAME identity, until that identity changes.
+ *
+ * Two identities, chosen by `source.actionId` (D-52, see the block comment
+ * above):
+ *   - `actionId !== null` (a real, `beginAction`-tracked action): identity is
+ *     `(source.generation, source.actionSeq)` — unchanged from CMBT-8/D-51.
+ *   - `actionId === null` (no tracked action — a basic attack, or a channel
+ *     that structurally cannot use `beginAction`): identity is
+ *     `(source.generation, step)` — one award per SIMULATION STEP, not one
+ *     per landed hit.
+ * Either way the identity resets (and a fresh award becomes payable) when
+ * the actor recycles (`generation` changes).
+ *
+ * Exported for `tests/combat/`'s own direct coverage.
+ * @param {object} source an Actor record.
+ * @param {number} step `env.step` — required for the `actionId === null`
+ *   identity; ignored (but still accepted, for a uniform call site) when a
+ *   real action is in progress.
+ * @returns {boolean}
+ */
+export function shouldAwardActionRage(source, step) {
+  ensureActionRageCapacity(source.poolIndex);
+  const counter = source.actionId === null ? step : source.actionSeq;
+  const stamp = encodeActionRageStamp(source.generation, counter);
+  if (lastRageActionStamp[source.poolIndex] === stamp) return false;
+  lastRageActionStamp[source.poolIndex] = stamp;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// `packet.requesterOwnsRageCredit` — the R2 escape hatch (SKIL-7, D-52)
+// ---------------------------------------------------------------------------
+// A new `DamagePacket` field, NOT yet in `ARCHITECTURE.md`'s "The damage
+// packet" block or `01-data-model.md` §8's own copy — flagged prominently
+// here and in this ticket's report for the doc owner to add, per this
+// ticket's own instruction not to edit `docs/spec/` directly.
+//
+//   requesterOwnsRageCredit: boolean, default false
+//
+// Semantics: when `true`, `applyOnHitEconomy` below skips the ATTACKER's
+// rage credit for this hit (R14(f)'s attacker-rage row, and ONLY that row)
+// — the requester that built this packet already accounts for the
+// attacker's rage on its own schedule. Every other R14(f) row is untouched
+// by this flag: Resonance stays per-landed-hit unconditionally (D-05-2 — an
+// imbue charge is consumed by a landed hit and a landed hit is what grants
+// one; gating this too would break that identity and `05` §12.5's 16.1%
+// overflow figure with it), and the DEFENDER's `+4` rage-on-take-hit is
+// untouched (it is the struck actor's own economy, nothing to do with who
+// requested the hit). Defaults `false`, so every existing caller — every
+// packet `combat.buildAttackPacket()` has ever produced until this ticket —
+// is byte-for-byte unaffected: `combat` credits the attacker exactly as it
+// always has.
+//
+// The one caller that sets it today is `src/skills/channel.js`'s own
+// `whirlwind` tick handler (SKIL-7): a channel's rage income runs at
+// `attackInterval` cadence (R2, `05-skills.md` §1.6), which is neither
+// per-hit nor per-step, so `combat`'s own guard — even tightened to
+// per-step by D-52 above — cannot reproduce it. `skills` sets this flag on
+// its own packet and owns the attacker's rage credit for that packet's
+// hits entirely, calling `cost.js#rageForLandedAction` itself at the
+// correct cadence. See that file's own header for the full reasoning.
+//
+// `02-api-contracts.md` §8's "Forbidden for callers" list ("Never mutate a
+// packet returned by buildAttackPacket() other than the fields documented
+// as caller-adjustable: radius consumers, pierceIndex, onHitStatus,
+// knockback, originX/Y/Z") also needs `requesterOwnsRageCredit` added to
+// that whitelist — flagged in this ticket's report, not edited here either.
+
+// ---------------------------------------------------------------------------
 // Pure formulas — each one independently testable, matching resolve.js's
 // own granular per-step export style (stepR7a/b/c, resistAfterPierce, ...).
 // ---------------------------------------------------------------------------
@@ -332,9 +509,23 @@ export function applyOnHitEconomy(packet, target, result, env) {
   // the ticket's own prose states them in ("the attacker gains +6 ... and
   // the target gains +4 ...").
   if (source && !source.dead && source.stats && outcome === 'hit' && result.total > 0 && isLikelyMeleeAttack(packet)) {
-    addResourceClamped(source, 'rage', rageGainOnHit(source.stats.rageOnHit), source.stats.maxRage);
-    if (log) log.push('R14(f):rage-attacker');
+    // R1 (CMBT-8/D-51, tightened by D-52): rage is per ACTION (or, with no
+    // tracked action, per STEP — see shouldAwardActionRage's own header),
+    // credited on the first landed hit only. `packet.requesterOwnsRageCredit`
+    // (SKIL-7) is the escape hatch for R2: a channel's cadence is neither
+    // per-hit nor per-step, so a packet that sets this flag tells `combat`
+    // "the requester already accounts for the attacker's rage on this hit —
+    // do not award it here at all." Defaults `false` — every existing caller
+    // is unaffected.
+    if (!packet.requesterOwnsRageCredit && shouldAwardActionRage(source, env.step)) {
+      addResourceClamped(source, 'rage', rageGainOnHit(source.stats.rageOnHit), source.stats.maxRage);
+      if (log) log.push('R14(f):rage-attacker');
+    }
 
+    // Resonance is per-LANDED-HIT, never per-action (D-05-2: "a landed hit
+    // is what grants a Resonance charge" — an exact identity the Runeblade
+    // imbue economy depends on). Deliberately NOT behind
+    // shouldAwardActionRage — gating this too would break that identity.
     addResourceClamped(source, 'resonance', resonanceGainOnHit(source.stats.resonanceOnHit), source.stats.maxResonance);
     if (log) log.push('R14(f):resonance-attacker');
   }

@@ -322,6 +322,7 @@ import { EventBus } from '../../src/core/events.js';
 import { PhysicsSystem } from '../../src/physics/index.js';
 import { ActorsSystem } from '../../src/actors/index.js';
 import { CombatSystem } from '../../src/combat/packet.js';
+import { SkillsSystem } from '../../src/skills/index.js'; // SKIL-1 — see "SKIL-1 probes" below
 
 import { stats, markDirty, setSourceLayer } from '../../src/actors/stats.js';
 import { addLife, addMana, addRage, addResonance, canAfford, spend, lifeFraction } from '../../src/actors/vessels.js';
@@ -349,12 +350,13 @@ async function buildScenario() {
   const physics = new PhysicsSystem();
   const actors = new ActorsSystem();
   const combat = new CombatSystem();
+  const skills = new SkillsSystem(); // SKIL-1 — static deps = ['actors','combat'], initialised after both, see below
 
   const ctx = makeStubCtx({
     rng,
     events: realEvents,
     config: { q: { maxActors: 64 } },
-    systems: { physics, actors, combat },
+    systems: { physics, actors, combat, skills },
   });
 
   // Init order matches 02-api-contracts.md's own topological order
@@ -367,6 +369,7 @@ async function buildScenario() {
   await physics.init(ctx);
   await actors.init(ctx);
   await combat.init(ctx);
+  await skills.init(ctx); // SKIL-1 — after actors and combat, matching its static deps
 
   // A generous flat zone so groundHeight() never reads -Infinity — no
   // statics registered (this scenario needs none; the cluster is what
@@ -434,7 +437,7 @@ async function buildScenario() {
   const resultOuts = [];
   for (let i = 0; i < N; i++) resultOuts.push(blankResult());
 
-  return { ctx, physics, actors, combat, monsters, packetOuts, resultOuts };
+  return { ctx, physics, actors, combat, skills, monsters, packetOuts, resultOuts };
 }
 
 /**
@@ -457,10 +460,11 @@ async function buildScenario() {
  * costs nothing, and is correct hygiene regardless (`ARCHITECTURE.md` rule
  * 7) — not presented as a complete fix for the underlying artifact.
  * `physics` has no `dispose()` method yet (not implemented this milestone)
- * — guarded, not assumed.
- * @param {{combat:object, actors:object, physics:object}} scenario
+ * — guarded, not assumed. `skills` (SKIL-1) likewise has none yet — same guard.
+ * @param {{combat:object, actors:object, physics:object, skills?:object}} scenario
  */
 function disposeScenario(scenario) {
+  if (scenario.skills && typeof scenario.skills.dispose === 'function') scenario.skills.dispose();
   if (scenario.combat && typeof scenario.combat.dispose === 'function') scenario.combat.dispose();
   if (scenario.actors && typeof scenario.actors.dispose === 'function') scenario.actors.dispose();
   if (scenario.physics && typeof scenario.physics.dispose === 'function') scenario.physics.dispose();
@@ -492,7 +496,7 @@ test('12.A01 — actors/vessels/action/status pure engines + combat CombatSystem
   }
 
   const scenario = await buildScenario();
-  const { combat, monsters } = scenario;
+  const { combat, skills, actors, monsters } = scenario;
   const actor = monsters[0];
   const other = monsters[1];
 
@@ -505,6 +509,29 @@ test('12.A01 — actors/vessels/action/status pure engines + combat CombatSystem
   // double-release is a documented safe no-op — src/combat/packet.js's
   // PacketPool#release).
   const spareResult = combat.scratchPacket();
+
+  // SKIL-1 — untimed setup for the `skills` probes below. `allocate()`
+  // lazily creates `actor.skillPoints` on its first call for a given actor
+  // (src/skills/index.js's `pointsOf()`) — doing that ONCE here, untimed,
+  // means every probe closure below only ever WRITES an already-existing
+  // key (`actor.skillPoints.cleaving_strike`), never creates a new one, so
+  // none of them pay that one-time-per-actor object-creation cost.
+  skills.allocate(actor, 'cleaving_strike');
+  skills.respec(actor); // back to 0 — the probes below manage their own reset
+  let skillsProbeSink; // sink for the property/object-returning skills probes, keeps the call from being dead-code-eliminated
+  // SKIL-11's `buffList` debt row — a caller-owned, reused `out` array
+  // (`Alloc: no` per its own contract: mutated in place, never grown).
+  const skillsBuffListOut = [{ buffId: null, level: 0, remaining: 0, stacks: 0 }, { buffId: null, level: 0, remaining: 0, stacks: 0 }];
+  // SKIL-12 — `describe()`'s own caller-owned `SkillDescription`
+  // (`02-api-contracts.md:886`: `Alloc: no`), preallocated once here —
+  // exactly the "`ui` renders it and never recomputes a skill number" shape
+  // the contract's own comment gives, `lines` × 8 preallocated entries.
+  const skillsDescribeOut = {
+    lineCount: 0, lines: Array.from({ length: 8 }, () => ({ labelKey: null, value: 0, unit: null, format: null })),
+    costResource: null, costAmount: 0,
+    cooldown: 0, castTime: 0, radius: 0, range: 0, duration: 0,
+    damageMin: 0, damageMax: 0,
+  };
 
   /** @type {{name:string, iterations:number, fn:() => void}[]} */
   const PROBES = [
@@ -570,6 +597,123 @@ test('12.A01 — actors/vessels/action/status pure engines + combat CombatSystem
     // actually zero-alloc; see the file header's "Found, and now fixed by
     // someone else — (1)".
     { name: 'combat: expireBySource(sourceId,sourceGen,status) [CMBT-4 fix verified]', iterations: 2_000_000, fn: () => { combat.expireBySource(999, 0, null); } },
+
+    // --- skills/index.js SkillsSystem instance methods (SKIL-1) ------------
+    // All eleven rows of 02-api-contracts.md §10's "Registry and allocation"
+    // table are `Alloc: no` — every one of the eleven public methods is
+    // probed below, none excluded.
+    { name: 'skills: definition("cleaving_strike")', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.definition('cleaving_strike'); } },
+    { name: 'skills: all [property, same reference every call]', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.all; } },
+    { name: 'skills: forClass("ravager")', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.forClass('ravager'); } },
+    { name: 'skills: forTree("carnage")', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.forTree('carnage'); } },
+    { name: 'skills: trees("ravager")', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.trees('ravager'); } },
+    { name: 'skills: instanceOf(actor,"cleaving_strike") [shared scratch object, mutated in place]', iterations: 1_000_000, fn: () => { skillsProbeSink = skills.instanceOf(actor, 'cleaving_strike'); } },
+    { name: 'skills: effectiveLevel(actor,"cleaving_strike")', iterations: 2_000_000, fn: () => { skills.effectiveLevel(actor, 'cleaving_strike'); } },
+    { name: 'skills: canAllocate(actor,"cleaving_strike") [shared scratch object, mutated in place]', iterations: 1_000_000, fn: () => { skillsProbeSink = skills.canAllocate(actor, 'cleaving_strike'); } },
+    {
+      name: 'skills: allocate(actor,"cleaving_strike") [harness resets the allocated count to 0 before every call — an EXISTING key, never a new one, see the untimed setup above]',
+      iterations: 1_000_000,
+      fn: () => { actor.skillPoints.cleaving_strike = 0; skills.allocate(actor, 'cleaving_strike'); },
+    },
+    {
+      name: 'skills: respec(actor) [harness sets cleaving_strike=1 before every call — an EXISTING key]',
+      iterations: 1_000_000,
+      fn: () => { actor.skillPoints.cleaving_strike = 1; skills.respec(actor); },
+    },
+    { name: 'skills: synergyBonus(actor,"whirlwind","weaponDamage")', iterations: 2_000_000, fn: () => { skills.synergyBonus(actor, 'whirlwind', 'weaponDamage'); } },
+
+    // --- SKIL-4's debt: two SKIL-2 Casting-table rows the file was held on
+    // during SKIL-2's own round (`docs/spec/02-api-contracts.md` §10:
+    // `costOf`/`cooldownRemaining`, both `Alloc: no`) — see this ticket's
+    // brief, "A debt I am handing you with tests/core/alloc.test.js". Never
+    // narrowing an existing probe (O-58) — these are pure additions.
+    { name: 'skills: costOf(actor,"cleaving_strike")', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.costOf(actor, 'cleaving_strike'); } },
+    { name: 'skills: cooldownRemaining(actor,"ram_charge")', iterations: 2_000_000, fn: () => { skills.cooldownRemaining(actor, 'ram_charge'); } },
+
+    // --- SKIL-4's debt: seven ACTR-22 rows (`02-api-contracts.md` §7,
+    // `Alloc: no`) held during ACTR-22's own round for the same reason.
+    // These exercise the PUBLIC `ActorsSystem` SURFACE (`ctx.get('actors')`
+    // forwards), not the bare pure `vessels.js` functions this file already
+    // probes above (`addLife`/`addMana`/.../`lifeFraction` on `actor`
+    // directly) — O-58's whole lesson: a subsystem method and the pure
+    // function it forwards to are two different things to gate, and gating
+    // only one is what let a real regression through undetected before.
+    { name: 'actors: addLife(actor,1,0)', iterations: 2_000_000, fn: () => { actors.addLife(actor, 1, 0); actor.life = 1_000_000; } },
+    { name: 'actors: addMana(actor,1)', iterations: 2_000_000, fn: () => { actors.addMana(actor, 1); actor.mana = 1_000_000; } },
+    { name: 'actors: addRage(actor,1)', iterations: 2_000_000, fn: () => { actors.addRage(actor, 1); } },
+    { name: 'actors: addResonance(actor,0.1)', iterations: 2_000_000, fn: () => { actors.addResonance(actor, 0.1); } },
+    { name: 'actors: canAfford(actor,"life",1)', iterations: 2_000_000, fn: () => { actors.canAfford(actor, 'life', 1); } },
+    { name: 'actors: spend(actor,"mana",0)', iterations: 2_000_000, fn: () => { actors.spend(actor, 'mana', 0); } },
+    { name: 'actors: lifeFraction(actor)', iterations: 2_000_000, fn: () => { actors.lifeFraction(actor); } },
+
+    // --- SKIL-4's own new Alloc: no rows (02-api-contracts.md §10) --------
+    { name: 'skills: killProjectile(0) [id 0 — always a safe no-op, never a real slot]', iterations: 2_000_000, fn: () => { skills.killProjectile(0); } },
+    { name: 'skills: projectileCount [property]', iterations: 2_000_000, fn: () => { skillsProbeSink = skills.projectileCount; } },
+
+    // --- SKIL-11's debt: five SKIL-10 rows the file was held on during
+    // SKIL-10's own round (`docs/spec/02-api-contracts.md` §10: `hasBuff`,
+    // `buffRemaining`, `buffList`, `absorbRemaining`, `removeBuff`, all
+    // `Alloc: no` — see this ticket's brief, "A debt I am handing you with
+    // tests/core/alloc.test.js"). Never narrowing an existing probe (O-58) —
+    // these are pure additions. `actor` (monsters[0]) carries no buffs here
+    // (the common case — `tests/skills/buff.perf.test.js`'s own "no buffs"
+    // scenario already covers the same methods with real buffs active; this
+    // file's job is coverage-count completeness, not re-proving that).
+    // `skills.applyBuff` is deliberately NOT added here — SKIL-10's own
+    // `applyBuff('blade_seal', ...)` throws by design (`./buff.js`'s header)
+    // and every other `buffId` needs a real cast/apply sequence untimed
+    // setup this file's existing `monsters[]` fixture (no mana/resonance
+    // composed meaningfully — 12.A02's own "ZERO_CLASS" note) cannot cheaply
+    // support; `buff.perf.test.js` already gates `applyBuff` at scale.
+    {
+      name: 'skills: hasBuff(actor,"war_cry") [no buff — SKIL-10 debt]',
+      iterations: 2_000_000,
+      fn: () => { skills.hasBuff(actor, 'war_cry'); },
+    },
+    {
+      name: 'skills: buffRemaining(actor,"last_stand") [no buff — SKIL-10 debt]',
+      iterations: 2_000_000,
+      fn: () => { skills.buffRemaining(actor, 'last_stand'); },
+    },
+    {
+      name: 'skills: buffList(actor, out) [no buffs — SKIL-10 debt]',
+      iterations: 1_000_000,
+      fn: () => { skillsProbeSink = skills.buffList(actor, skillsBuffListOut); },
+    },
+    {
+      name: 'skills: absorbRemaining(actor) [no absorb pool — SKIL-10 debt]',
+      iterations: 2_000_000,
+      fn: () => { skills.absorbRemaining(actor); },
+    },
+    {
+      name: 'skills: removeBuff(actor,"war_cry") [already absent — steady-state no-op — SKIL-10 debt]',
+      iterations: 1_000_000,
+      fn: () => { skills.removeBuff(actor, 'war_cry'); },
+    },
+    // NOT added: `skills.buffRemaining(actor,'blade_seal')` — SKIL-10
+    // measured it at ~7.6-16 B/call against a real `boot()`-composed actor
+    // but ~0.008 against a synthetic one, an O-79-shaped unexplained floor
+    // inside `src/skills/imbue.js` (not this ticket's file). Recorded, left
+    // out of the gated list per this ticket's own brief, verbatim.
+
+    // --- SKIL-11's own new Alloc: no row (02-api-contracts.md §10) --------
+    {
+      name: 'skills: summonOf(actor,"echo_blade") [no summon]',
+      iterations: 2_000_000,
+      fn: () => { skillsProbeSink = skills.summonOf(actor, 'echo_blade'); },
+    },
+
+    // --- SKIL-12's own new Alloc: no row (02-api-contracts.md:886,
+    // `describe`) — UI-9 calls this TWICE PER HOVERED NODE (level N, then
+    // N+1); see `tests/skills/synergy.perf.test.js` for the dedicated N/N+1
+    // proof against a real `flatDamage` synergy (meteor at 20/20 sources).
+    // This row's job is coverage-count completeness for `12.A01`, not a
+    // second N/N+1 proof.
+    {
+      name: 'skills: describe(actor,"cleaving_strike",10,out)',
+      iterations: 1_000_000,
+      fn: () => { skillsProbeSink = skills.describe(actor, 'cleaving_strike', 10, skillsDescribeOut); },
+    },
   ];
 
   const results = [];
@@ -586,12 +730,16 @@ test('12.A01 — actors/vessels/action/status pure engines + combat CombatSystem
   // today". `combat.expireBySource` rejoined this round (CMBT-4 fixed it —
   // see the file header) for a total of 34, up from 33.
   console.log(`[12.A01] probed ${results.length} Alloc: no methods, all < 1 byte/call. ` +
-    `(33 in the previous round of this ticket + 1 rejoined this round — combat.expireBySource, CMBT-4 fix verified.)`);
+    `(45 as of SKIL-1's round + 9 debt rows owed SKIL-2/ACTR-22 + 2 SKIL-4 rows + 5 debt rows owed SKIL-10 ` +
+    `(hasBuff/buffRemaining/buffList/absorbRemaining/removeBuff) + 1 SKIL-11 row (summonOf) + 1 SKIL-12 row (describe) this round.)`);
   assert.equal(results.length, PROBES.length);
   // >= (never a hard ===): O-27 — a later ticket adding a new Alloc: no row
   // should be able to append a probe here without this assertion breaking;
   // the floor only ever moves up as this file catches up with new rows.
-  assert.ok(results.length >= 34, `expected at least 34 Alloc: no methods probed (33 + combat.expireBySource rejoining after CMBT-4's fix); got ${results.length} — see this file header if the count needs to change`);
+  // Raised from 56 (never lowered — O-58) to 62 (5 debt rows owed SKIL-10 +
+  // 1 SKIL-11 row, `summonOf`), then to 63: + 1 SKIL-12 row (`describe`,
+  // `02-api-contracts.md:886`).
+  assert.ok(results.length >= 63, `expected at least 63 Alloc: no methods probed; got ${results.length} — see this file header if the count needs to change`);
 
   // See `disposeScenario`'s own doc comment — load-bearing for `12.A02`,
   // which runs next in this same process, not just hygiene.

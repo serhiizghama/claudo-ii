@@ -120,6 +120,7 @@ import { ActorsSystem } from './actors/index.js';
 import { PlayerSystem } from './player/index.js';
 import { NavSystem } from './nav/index.js';
 import { CombatSystem } from './combat/packet.js';
+import { SkillsSystem } from './skills/index.js';
 import { UiSystem } from './ui/index.js';
 import { ItemsSystem } from './items/index.js';
 import { SaveSystem } from './save/index.js';
@@ -447,6 +448,7 @@ export async function boot(opts = {}) {
   registry.add(PlayerSystem);
   registry.add(NavSystem);
   registry.add(CombatSystem);
+  registry.add(SkillsSystem);
   registry.add(UiSystem);
   registry.add(ItemsSystem);
   registry.add(SaveSystem);

@@ -30,10 +30,21 @@
  * "Transform and motion" it judged in scope — `teleport`, `face`,
  * `moveSpeed`, `distance`, `inRange` — plus the dev-build write guard on
  * `actor.x`/`actor.z` (see `motion.js`'s header for the guard design and for
- * why `applyImpulse` is the one row deliberately left out). Everything past
- * "Transform and motion" (`stats()`, `setState`, `applyStatus`, ...) still
- * belongs to a later ticket and is deliberately absent, not stubbed (see
- * this ticket's report).
+ * why `applyImpulse` is the one row deliberately left out). ACTR-15/O-57
+ * later forwarded `stats`, `markDirty`, `setSourceLayer` (Stats and
+ * vessels), and ACTR-20/O-57 forwarded `setState`, `beginAction`, `canAct`,
+ * `canMove` (Action state machine) and `applyStatus` (Status effects).
+ * ACTR-22/D-52 forwarded seven "Stats and vessels" rows — `addLife`,
+ * `addMana`, `addRage`, `addResonance`, `spend`, `canAfford`,
+ * `lifeFraction`. That forward was declared as closing O-57, but the
+ * orchestrator's own audit for ACTR-23/D-56 found eight more unforwarded
+ * rows across two other tables — `cancelAction`/`actionProgress` (Action
+ * state machine) and `removeStatus`/`hasStatus`/`statusStacks`/
+ * `statusRemaining`/`clearStatuses`/`expireBySource` (Status effects).
+ * ACTR-23/D-56 forwards all eight below, closing O-57 for real. Everything
+ * left in the table — the whole of "Presentation" — still belongs to a
+ * later ticket and is deliberately absent, not stubbed (see this ticket's
+ * report).
  */
 // (docs/spec/02-api-contracts.md §7, verbatim above — see that document for
 // the full method table this ticket implements the Lifecycle slice of.)
@@ -115,6 +126,36 @@ import {
 } from './motion.js';
 import { spawnBoneRanker } from './archetypes/bone_ranker.js';
 import { stats as statsPure, markDirty as markDirtyPure, setSourceLayer as setSourceLayerPure } from './stats.js';
+import {
+  addLife as addLifePure,
+  addMana as addManaPure,
+  addRage as addRagePure,
+  addResonance as addResonancePure,
+  spend as spendPure,
+  canAfford as canAffordPure,
+  lifeFraction as lifeFractionPure,
+} from './vessels.js';
+import {
+  setState as setStatePure,
+  beginAction as beginActionPure,
+  cancelAction as cancelActionPure,
+  canAct as canActPure,
+  canMove as canMovePure,
+  actionProgress as actionProgressPure,
+} from './action.js';
+import {
+  applyStatus as applyStatusPure,
+  removeStatus as removeStatusPure,
+  hasStatus as hasStatusPure,
+  statusStacks as statusStacksPure,
+  statusRemaining as statusRemainingPure,
+  clearStatuses as clearStatusesPure,
+  expireBySource as expireBySourcePure,
+  expireStatuses,
+} from './status.js';
+import { integrateVessels } from './vessels.js';
+import { advanceAndEmitHitframe } from './timing.js';
+import { ACTOR_STATE } from './data/states.js';
 
 // ---------------------------------------------------------------------------
 // ACTR-6 — dev-only archetype-visual escape hatch (see `__archetypeVisuals`
@@ -173,6 +214,16 @@ export const SPAWN_SPEC_DEFAULTS = Object.freeze({
   affixes: [],
   nameOverride: null,
 });
+
+/** `08-characters-visual.md` §5.5 line 910 — the `spawn` animation state's
+ * own duration row (`| spawn | 1.00 | no | locked | 0 | 0.20 | full | ... |`),
+ * cross-referenced by `06-monsters-ai.md:1731`'s `| Spawn state |
+ * ACTOR_STATE.spawning for 1.00 s, invulnerable, no collision | 01 §1.4,
+ * 08 §5.5 |`. Compared directly against `actor.stateTime`
+ * (`01-data-model.md` line 275: "seconds in the current state, integrated
+ * at 60 Hz") — `fixedUpdate` accumulates `stateTime` by `h` (the fixed
+ * step, always `1/60`) every step, never by a private tick counter. */
+export const SPAWNING_STATE_SECONDS = 1.00;
 
 /** `team -> physics.LAYER` key, so `spawn()` can compute the right
  * collision layer without hardcoding `physics.LAYER`'s numeric values (it
@@ -357,6 +408,40 @@ export class ActorsSystem {
       this._bodyId[actor.poolIndex] = 0;
     }
 
+    // ACTR-21/O-67 — fill the vessels from the composed StatBlock.
+    // `pool.js#acquire` leaves every vessel at its zeroed baseline
+    // (`life: 0`, `mana: 0`, ...); nothing filled them before this ticket
+    // (docs/PROGRESS.md O-67's own finding: a fresh actor reads
+    // `life=0 mana=0 rage=0` forever). `13-progression-lore.md` §1's "Life /
+    // Mana at 1" dossier row is life and mana at their STARTING (=maximum,
+    // for a fresh character) value — rage/resonance are deliberately NOT
+    // filled here: they stay at the pool's own `0` default, the same
+    // "combat-earned, never free" carve-out `11-flows.md:1355`'s level-up
+    // refill states explicitly ("`rage` and `resonance` are not refilled").
+    // `stamina`'s starting value is not given anywhere in this ticket's
+    // reading window — left at the pool default (`0`) rather than guessed;
+    // see the report.
+    //
+    // `statsPure(actor)` is called here PURELY to read `maxLife`/`maxMana`
+    // off a real composition — it is NOT a substitute for the caller's own
+    // later `stats()`/`markDirty()` cycle. Composing clears `statsDirty`
+    // (`stats.js#composeStats`'s own last step) as a side effect, and a
+    // caller that spawns an actor and then writes `attributes`/equipment
+    // directly before its first real `stats()` read (several already-
+    // accepted tests do exactly this, e.g. `tests/items/equipment.test.js`
+    // ITMS.E17: `actor.attributes.strength = 60` right after `spawn()`)
+    // depends on `statsDirty` still reading `true` at that point, so the
+    // NEXT `stats()` call recomposes for real instead of returning this
+    // spawn-time snapshot. `actor.statsDirty` is restored to `true`
+    // immediately after, preserving "a freshly spawned actor starts dirty"
+    // (already asserted by the accepted `tests/actors/actr15.test.js`) —
+    // the one-time recompute this costs is spawn-only, not a `fixedUpdate`
+    // steady-state cost, so it does not touch rule 6's per-frame budget.
+    const spawnedStats = statsPure(actor);
+    actor.life = spawnedStats.maxLife;
+    actor.mana = spawnedStats.maxMana;
+    actor.statsDirty = true;
+
     return actor;
   }
 
@@ -428,8 +513,10 @@ export class ActorsSystem {
   }
 
   // ─── Stats and vessels (02-api-contracts.md §7) ────────────────────────
-  // ACTR-15/O-57: only these three rows. The rest of this section
-  // (addLife, spend, lifeFraction, ...) is a later ticket's — not stubbed.
+  // ACTR-15/O-57 forwarded `stats`/`markDirty`/`setSourceLayer` above.
+  // ACTR-22/D-52 forwards the remaining seven rows below — `addLife`,
+  // `addMana`, `addRage`, `addResonance`, `spend`, `canAfford`,
+  // `lifeFraction` — all pure forwards into `vessels.js`, closing O-57.
 
   /** `02-api-contracts.md` §7: `stats(actor) => StatBlock` — recomposes if
    * dirty, then returns; same reference every call on a clean actor. */
@@ -455,6 +542,202 @@ export class ActorsSystem {
    * also emit `stats:dirty`. */
   setSourceLayer(actor, layer, partial) {
     setSourceLayerPure(actor, layer, partial);
+  }
+
+  /** `02-api-contracts.md` §7: `addLife(actor, amount, sourceId) => number`
+   * — actual amount applied. Pure forward; see `vessels.js#addLife`. */
+  addLife(actor, amount, sourceId) {
+    return addLifePure(actor, amount, sourceId);
+  }
+
+  /** `02-api-contracts.md` §7: `addMana(actor, amount) => number`. Pure
+   * forward; see `vessels.js#addMana`. */
+  addMana(actor, amount) {
+    return addManaPure(actor, amount);
+  }
+
+  /** `02-api-contracts.md` §7: `addRage(actor, amount) => number`. Pure
+   * forward; see `vessels.js#addRage`. */
+  addRage(actor, amount) {
+    return addRagePure(actor, amount);
+  }
+
+  /** `02-api-contracts.md` §7: `addResonance(actor, amount) => number`.
+   * Pure forward; see `vessels.js#addResonance`. */
+  addResonance(actor, amount) {
+    return addResonancePure(actor, amount);
+  }
+
+  /** `02-api-contracts.md` §7: `spend(actor, resource, amount|'all') =>
+   * boolean` — atomic; false if short. Pure forward; see
+   * `vessels.js#spend` for the `'all'` semantics (`floor(actor[resource])`,
+   * fails below 1). */
+  spend(actor, resource, amount) {
+    return spendPure(actor, resource, amount);
+  }
+
+  /** `02-api-contracts.md` §7: `canAfford(actor, resource, amount) =>
+   * boolean`. Pure forward; see `vessels.js#canAfford`. */
+  canAfford(actor, resource, amount) {
+    return canAffordPure(actor, resource, amount);
+  }
+
+  /** `02-api-contracts.md` §7: `lifeFraction(actor) => number` — 0..1.
+   * Pure forward; see `vessels.js#lifeFraction`. */
+  lifeFraction(actor) {
+    return lifeFractionPure(actor);
+  }
+
+  // ─── Action state machine (02-api-contracts.md §7) ─────────────────────
+  // ACTR-20/O-57 forwarded `setState`, `beginAction`, `canAct`, `canMove`.
+  // ACTR-23/D-56 forwards the remaining two rows below — `cancelAction`,
+  // `actionProgress` — both pure forwards into `action.js`, closing this
+  // table.
+
+  /** `02-api-contracts.md` §7: `setState(actor, state) => boolean` — false
+   * on an illegal transition. Pure forward; see `action.js#setState`. */
+  setState(actor, state) {
+    return setStatePure(actor, state);
+  }
+
+  /** `02-api-contracts.md` §7: `beginAction(actor, actionId, windup, active,
+   * recover) => int actionSeq`. Pure forward; see `action.js#beginAction`. */
+  beginAction(actor, actionId, windup, active, recover) {
+    return beginActionPure(actor, actionId, windup, active, recover);
+  }
+
+  /** `02-api-contracts.md` §7: `canAct(actor) => boolean` — false while
+   * frozen, stunned, dead, in hitstun. Pure forward; see
+   * `action.js#canAct`. */
+  canAct(actor) {
+    return canActPure(actor);
+  }
+
+  /** `02-api-contracts.md` §7: `canMove(actor) => boolean`. Pure forward;
+   * see `action.js#canMove`. */
+  canMove(actor) {
+    return canMovePure(actor);
+  }
+
+  /** `02-api-contracts.md` §7: `cancelAction(actor, reason) => boolean` —
+   * false on an illegal cancel (unrecognised reason, terminal/invulnerable
+   * state, or a gating rule in `action.js` — e.g. `'input'` only accepted
+   * from `recover` at `actionProgress >= 0.75`, `'interrupt'` refused during
+   * `windup`/`active`/`recover`). Pure forward; see
+   * `action.js#cancelAction`. */
+  cancelAction(actor, reason) {
+    return cancelActionPure(actor, reason);
+  }
+
+  /** `02-api-contracts.md` §7: `actionProgress(actor) => number` — 0..1
+   * across the whole action (wind-up + active + recover together); `0` when
+   * no action is in progress. Pure forward; see
+   * `action.js#actionProgress`. */
+  actionProgress(actor) {
+    return actionProgressPure(actor);
+  }
+
+  // ─── Status effects (02-api-contracts.md §7) ────────────────────────────
+  // ACTR-20/O-57 forwarded `applyStatus` — the only row of this section
+  // whose Alloc column is `pool`, not `no` (the pool itself lives in
+  // `status.js`, built once there; the forward allocates nothing of its
+  // own). ACTR-23/D-56 forwards the remaining six rows below — all pure
+  // forwards into `status.js`, closing this table.
+
+  /** `02-api-contracts.md` §7: `applyStatus(actor, spec) =>
+   * StatusEffectInstance | null`. `Alloc: pool` — draws from `status.js`'s
+   * own module-level instance pool, never `new`s here. Pure forward; see
+   * `status.js#applyStatus`. */
+  applyStatus(actor, spec) {
+    return applyStatusPure(actor, spec);
+  }
+
+  /** `02-api-contracts.md` §7: `removeStatus(actor, status) => int` —
+   * instances removed. Pure forward; see `status.js#removeStatus`. */
+  removeStatus(actor, status) {
+    return removeStatusPure(actor, status);
+  }
+
+  /** `02-api-contracts.md` §7: `hasStatus(actor, status) => boolean` —
+   * bitfield test. Pure forward; see `status.js#hasStatus`. */
+  hasStatus(actor, status) {
+    return hasStatusPure(actor, status);
+  }
+
+  /** `02-api-contracts.md` §7: `statusStacks(actor, status) => int`. Pure
+   * forward; see `status.js#statusStacks`. */
+  statusStacks(actor, status) {
+    return statusStacksPure(actor, status);
+  }
+
+  /** `02-api-contracts.md` §7: `statusRemaining(actor, status, step) =>
+   * number` — seconds, 0 if absent. Pure forward; see
+   * `status.js#statusRemaining` (that file's own header explains why `step`
+   * is a required third parameter, not a table typo). */
+  statusRemaining(actor, status, step) {
+    return statusRemainingPure(actor, status, step);
+  }
+
+  /** `02-api-contracts.md` §7: `clearStatuses(actor, onlyHarmful) => void`.
+   * Pure forward; see `status.js#clearStatuses`. */
+  clearStatuses(actor, onlyHarmful) {
+    clearStatusesPure(actor, onlyHarmful);
+  }
+
+  /** `02-api-contracts.md` §7: `expireBySource(actor, sourceId) => int` —
+   * instances removed. Pure forward; see `status.js#expireBySource`. */
+  expireBySource(actor, sourceId) {
+    return expireBySourcePure(actor, sourceId);
+  }
+
+  // ─── fixedUpdate (ACTR-21/O-67, D-49) ───────────────────────────────────
+  // `ARCHITECTURE.md`'s subsystem interface, not a `02-api-contracts.md`
+  // row (rule 7's own carve-out: "`fixedUpdate` is part of the subsystem
+  // interface ... it needs no new row"). Drives, once per real fixed step,
+  // per LIVE actor, the three already-built-but-never-called per-actor
+  // engines this ticket exists to wire up (see this ticket's report for
+  // why none of the three were reachable before now): `integrateVessels`
+  // (`vessels.js`, A3 in `11-flows.md`'s own `fixedUpdate` table),
+  // `advanceAndEmitHitframe` (`timing.js`, A4), and `expireStatuses`
+  // (`status.js` — `11-flows.md` assigns "status expiry" to `combat`'s own
+  // C3, not to `actors`'s A-steps; `combat` does not exist yet and this
+  // ticket's own brief names `expireStatuses` as one of the three functions
+  // to wire here regardless — see the report for this exact discrepancy,
+  // left for whoever builds `combat`'s C3 to reconcile). Then advances
+  // `actor.stateTime` (`01-data-model.md` line 275: "seconds in the current
+  // state, integrated at 60 Hz") by `h` and, for an actor still `spawning`
+  // once `SPAWNING_STATE_SECONDS` has elapsed, calls `setState(actor,
+  // 'idle')` — the other half of O-67 this ticket closes (the third piece,
+  // the bestiary/archetype stat layer for monsters, is explicitly NOT this
+  // ticket's — see the report).
+  //
+  // Iterates `this._pool.all`/`this._pool.count` — the pool's own cached,
+  // alloc-free `Proxy` view over its dense live list (`pool.js`'s own
+  // header: "same cached `Proxy` reference every call") — never builds an
+  // array of its own. Every per-actor call below takes the live actor
+  // record and either `step` or `h`/`events`, both already-live references
+  // off `ctx`; nothing here allocates.
+  // @param {number} h the fixed step, `FIXED_DT` (always `1/60`). Never
+  //   `ctx.time.dt`.
+  // @param {object} ctx
+  fixedUpdate(h, ctx) {
+    const step = ctx.time.step;
+    const events = ctx.events;
+    const list = this._pool.all;
+    const n = this._pool.count;
+
+    for (let i = 0; i < n; i++) {
+      const actor = list[i];
+
+      integrateVessels(actor, step);
+      advanceAndEmitHitframe(actor, events);
+      expireStatuses(actor, step);
+
+      actor.stateTime += h;
+      if (actor.state === ACTOR_STATE.spawning && actor.stateTime >= SPAWNING_STATE_SECONDS) {
+        setStatePure(actor, ACTOR_STATE.idle);
+      }
+    }
   }
 
   dispose() {

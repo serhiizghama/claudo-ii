@@ -186,6 +186,7 @@ Rules:
   onHitStatus: [{ status, chance, duration, stacks }],
   lifeSteal, manaSteal,
   knockback, sourceSkillId,
+  requesterOwnsRageCredit,   // caller credits the attacker's rage itself (channels, R2)
 }
 ```
 

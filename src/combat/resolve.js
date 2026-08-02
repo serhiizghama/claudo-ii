@@ -70,8 +70,72 @@
 //
 // Node-safe: no `three`, no DOM/browser global, no `performance.now()`
 // anywhere in this file.
+//
+// ---------------------------------------------------------------------------
+// CMBT-9 (D-55) addendum — R14(c) now imports from `./status.js`
+// ---------------------------------------------------------------------------
+// Defect B: this file's own R14(c) rider loop applied `rider.magnitude`/
+// `rider.duration` verbatim — no diminishing-returns chain, no ccReduction,
+// no rank multiplier — so a status applied through THIS file's default
+// `resolve()` path (a monster's attack, any caller that never routes through
+// `combat.applyStatusFromPacket()`) skipped the CC lock entirely. Fixed by
+// importing `rollDrChain`/`STUNNED_BOSS_DURATION_MULT` — `./status.js`'s
+// (CMBT-4) own EXPORTED public surface — rather than re-implementing the
+// stateful chain a second time; see the R14(c) block below and its own
+// `DR_CHAIN_STATUSES` comment for what could and could not be shared given
+// `status.js` is not in this ticket's file list (its `ccMultiplierOf`/
+// `CC_REDUCTION_EXEMPT_STATUSES`/`DR_CHAIN_STATUSES` are module-private,
+// duplicated here as the small fixed spec-literal constants they are).
+//
+// This makes `resolve.js` <-> `status.js` a genuine two-way sibling import
+// (`status.js` already imports `resistAfterPierce`/`isImmuneAtResist`/
+// `cappedEffectiveResist`/`applyResistFactor` from this file) — a real
+// tension with this file's own "one-way sibling import" precedent (line 8,
+// about `packet.js`). Verified safe in practice: neither file calls into the
+// other at module-evaluation time (only inside function bodies, invoked well
+// after both modules finish loading), so Node's ESM loader resolves the
+// cycle with live bindings and no TDZ error — confirmed by `npm run build`
+// and the full test suite (see this ticket's report). Flagged here rather
+// than silently introduced.
+//
+// ---------------------------------------------------------------------------
+// SKIL-10/O-90 addendum — R13 gains one hook: absorb pool consumption
+// ---------------------------------------------------------------------------
+// `05-skills.md` §3.5/§5.3: "absorb is consumed at R13, before `life -=
+// total`... It is not a resistance and is not affected by `physicalResist`"
+// and "a single hit larger than `life + absorb` still kills. The absorb is
+// not a death save." `src/combat/resolve.js` is granted to SKIL-10 as a
+// named micro-scope for exactly this hook (precedent D-38/PLYR-4) — R14, the
+// DR chain, the rider loop and `requesterOwnsRageCredit` are untouched.
+//
+// `consumeAbsorbPools` below is the ONLY change this addendum makes: one
+// call, inserted after R13 finishes computing `out.total`/`out.outcome` and
+// before `applyR14()` runs, so `applyR14`'s own `(a) life -= total` (and its
+// `overkill` calculation, which reads the same `out.total`) sees the
+// ALREADY-absorbed figure. `combat` never imports anything from
+// `src/skills/` to do this (`ARCHITECTURE.md` rule 2) — `target.absorbPools`
+// is plain data on the shared Actor record, written by
+// `src/skills/buff.js` and read/mutated here exactly the way
+// `shockedStacksOf()` above already reads `target.statuses` directly. See
+// `buff.js`'s own header for the full shape and the generation-stamping
+// rationale (recycle safety with no shared pool to leak from — O-49).
+//
+// A hit that ends outcome `'block'` (all damage already 0, R13's `total`
+// computation never runs for it) or that returns early at R1-R4 never
+// reaches this hook — matching exactly where R13 itself sits in the
+// pipeline; nothing to absorb on those paths regardless.
+//
+// Ambiguity resolved (rule per D-16, "say which one and stop"): `05`'s
+// "including poison seeding" phrase is read as "absorb is not exempted just
+// because a poison-flavoured component is present", NOT as "the poison DoT
+// seed (R14(b), which this hook may not touch) is itself reduced by
+// absorb" — `03` §6.2's own R13 row already excludes poison from `total`
+// ("poison is *not* summed here"), so a poison DoT seeded by an absorbed hit
+// is unaffected by this change, same as before. See `buff.js`'s header,
+// "Explicitly NOT implemented" item 3, for the fuller reasoning.
 
 import { chanceToHit, blockChanceOf } from './tohit.js';
+import { rollDrChain, STUNNED_BOSS_DURATION_MULT } from './status.js';
 
 // ---------------------------------------------------------------------------
 // Small local constants — redeclared rather than imported, matching the
@@ -101,6 +165,64 @@ const STATUS_BIT = Object.freeze({
 
 /** `03-combat-math.md` §7.6: "12 (% extra damage taken) per stack." */
 const SHOCKED_PERCENT_PER_STACK = 12;
+
+// ---------------------------------------------------------------------------
+// CMBT-9/D-55, defect B — R14(c)'s riders now consult the same
+// diminishing-returns chain `combat.applyStatusFromPacket()` (CMBT-4, this
+// file's sibling `./status.js`) uses, instead of applying `rider.magnitude`/
+// `rider.duration` verbatim. `rollDrChain` and `STUNNED_BOSS_DURATION_MULT`
+// are imported (that file's actual EXPORTED public surface) rather than
+// re-implemented — the stateful chain itself (`actor.stunChain`/
+// `stunChainAt`/`ccImmuneUntil`) is the one piece that must never have two
+// independent implementations, or the two paths could disagree about how
+// many "slots" an actor has used. `status.js`'s own `ccMultiplierOf` and
+// `CC_REDUCTION_EXEMPT_STATUSES`/`DR_CHAIN_STATUSES` are module-private
+// (not exported) and `status.js` itself is not in this ticket's file list
+// (see this ticket's report) — those three are duplicated below as the
+// one-line spec formula / two small fixed sets they are, not as logic that
+// could silently drift independently of the `03 §7` preamble text both
+// files already quote verbatim.
+// ---------------------------------------------------------------------------
+
+/** `03 §7.7`'s DR chain is shared by `stunned` and `frozen` — the same
+ * two-item set `status.js`'s own (private) `DR_CHAIN_STATUSES` names.
+ *
+ * Known, documented divergence for `frozen`: `status.js#applyOneRider`'s own
+ * `frozen` branch does not use this generic path at all — it calls the
+ * module-private `tryTriggerFreeze` (not exported), which IGNORES
+ * `rider.magnitude`/`rider.duration` entirely and substitutes the fixed
+ * `03 §7.2` formula (`FROZEN_BASE_DURATION × rank multiplier × dr.multiplier
+ * × ccMultiplierOf`, or a boss's `chilled`(60, 2.0s) substitution). That
+ * function is not reachable from here without either exporting it (out of
+ * this ticket's file list — `status.js` is not touchable, see the report)
+ * or duplicating its boss-substitution/`cannotBeFrozen`/champion-unique-rank
+ * branches wholesale. `status.js`'s own header already calls a direct
+ * `frozen` `onHitStatus` rider speculative ("no documented worked example
+ * exercises today") — no skill/monster data uses one. A `frozen` rider
+ * reaching THIS loop below is therefore handled through the generic
+ * DR-chain-gated branch (consulting the shared chain, so it still cannot
+ * bypass the CC lock or double-book a chain slot), but with `rider.duration`
+ * scaled by `dr.multiplier × ccMultiplierOf` rather than the boss/rank
+ * substitution `applyStatusFromPacket` would use. Flagged here rather than
+ * silently guessed at; see this ticket's report. */
+const DR_CHAIN_STATUSES = new Set(['stunned', 'frozen']);
+
+/** `03 §7`'s preamble: every duration is ccReduction-adjusted EXCEPT these
+ * three, "whose durations are fixed by the applying skill" — the same
+ * three-item set `status.js`'s own (private) `CC_REDUCTION_EXEMPT_STATUSES`
+ * names. */
+const CC_REDUCTION_EXEMPT_STATUSES = new Set(['burning', 'poisoned', 'bleeding']);
+
+/** `03 §7`'s preamble formula, verbatim: `(1 − clamp(ccReduction,0,75)/100)`.
+ * `0` (no reduction) when `target.stats` is not yet composed — same
+ * defensive default `status.js`'s own (private) `ccMultiplierOf` uses.
+ * @param {object} actor
+ * @returns {number}
+ */
+function ccMultiplierOf(actor) {
+  const cc = actor.stats ? clamp(actor.stats.ccReduction, 0, 75) : 0;
+  return 1 - cc / 100;
+}
 
 /** `01-data-model.md` §11.1: `DamageResult | combat | 256` — same capacity
  * as `packet.js`'s `PACKET_POOL_CAPACITY`. */
@@ -337,6 +459,61 @@ export function applyResistFactor(dmg, effectiveResistPercent) {
 export function applyTotalFloor(total, anyPositiveNonImmune) {
   if (anyPositiveNonImmune && total < 1) return 1;
   return total;
+}
+
+// ---------------------------------------------------------------------------
+// SKIL-10/O-90 — absorb pool consumption, R13. See this file's header
+// addendum above for the full reasoning.
+// ---------------------------------------------------------------------------
+
+/**
+ * `target.absorbPools`, when present, has the shape `{ generation:number,
+ * count:number, amount:Float64Array, buffIdx:Int32Array, level:Int32Array,
+ * expiresStep:Float64Array }` — built and owned by `src/skills/buff.js`; see
+ * that file's own header for why this lives on the Actor record instead of
+ * a `skills`-owned closure. Pools are stored oldest-first by array position
+ * (index 0 is always the oldest still-live pool); this function consumes
+ * strictly in that order, mutating `amount[]` in place, and compacts away
+ * any pool that is exhausted (`amount <= 0`) or has expired
+ * (`expiresStep <= step`) so the "index 0 is oldest SURVIVING pool"
+ * invariant holds after every call. A stale `generation` (a previous
+ * occupant of this actor-record slot left pools behind) reads as "no
+ * absorb", matching the same generation-stamp discipline used everywhere
+ * else in this codebase. Never allocates.
+ * @param {object} target an Actor
+ * @param {number} total R13's post-floor `total`, pre-absorb
+ * @param {number} step `ctx.time.step` (`env.step`)
+ * @returns {number} `total`, reduced by whatever absorb consumed — never
+ *   negative, never more than `total` itself. "Not a death save": if `total`
+ *   exceeds every pool's remaining amount combined, the unabsorbed remainder
+ *   is returned and still reaches R14(a)'s `life -= total`.
+ */
+export function consumeAbsorbPools(target, total, step) {
+  const a = target.absorbPools;
+  if (!a || a.generation !== target.generation || a.count === 0 || !(total > 0)) return total;
+
+  let remaining = total;
+  let w = 0;
+  for (let r = 0; r < a.count; r++) {
+    const expired = a.expiresStep[r] <= step;
+    if (!expired && remaining > 0 && a.amount[r] > 0) {
+      const absorbed = remaining < a.amount[r] ? remaining : a.amount[r];
+      a.amount[r] -= absorbed;
+      remaining -= absorbed;
+    }
+    const exhausted = a.amount[r] <= 0;
+    if (!expired && !exhausted) {
+      if (w !== r) {
+        a.amount[w] = a.amount[r];
+        a.buffIdx[w] = a.buffIdx[r];
+        a.level[w] = a.level[r];
+        a.expiresStep[w] = a.expiresStep[r];
+      }
+      w++;
+    }
+  }
+  a.count = w;
+  return remaining;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +757,11 @@ export function resolveDamage(packet, target, env, out) {
   out.total = total;
   out.outcome = total === 0 && anyImmunedPositive ? 'immune' : 'hit';
 
+  // SKIL-10/O-90 — R13's absorb hook, strictly before R14(a)'s `life -=
+  // total`. See this file's header addendum and `consumeAbsorbPools`'s own
+  // doc comment above.
+  out.total = consumeAbsorbPools(target, out.total, env.step);
+
   applyR14(packet, target, env, out, phys, poisonWorking);
   return out;
 }
@@ -620,24 +802,41 @@ function applyR14(packet, target, env, out, phys, poisonAppliedTotal) {
   }
   out.poison = 0; // "the instalment applied THIS step (0 for the DoT seed)" — 01 §8.2.
 
-  // (c) onHitStatus[] riders, in array order, each its own U(0,100)<chance draw
+  // (c) onHitStatus[] riders, in array order, each its own U(0,100)<chance
+  // draw. `stunned`/`frozen` riders consult the shared diminishing-returns
+  // chain (`rollDrChain`, see this file's own header — CMBT-9/D-55, defect
+  // B: this loop used to apply `rider.magnitude`/`rider.duration` verbatim,
+  // which let a status applied through THIS default path skip the CC lock
+  // `05 §12.7` relies on entirely). Every non-DR-chain, non-exempt rider
+  // still gets `03 §7`'s preamble ccReduction adjustment, which this loop
+  // never applied at all before this fix either.
   for (let i = 0; i < packet.onHitCount; i++) {
     const rider = packet.onHitStatus[i];
-    if (draw100(env.rng) < rider.chance) {
-      const spec = env.statusSpec;
-      spec.status = rider.status;
-      spec.step = env.step;
-      spec.sourceId = packet.sourceId;
-      spec.sourceGen = packet.sourceGen;
-      spec.sourceSkill = packet.sourceSkillId;
-      spec.element = null;
-      spec.magnitude = rider.magnitude;
-      spec.duration = rider.duration;
-      spec.stacks = rider.stacks || 1;
-      if (env.actorsSystem && typeof env.actorsSystem.applyStatus === 'function') {
-        const inst = env.actorsSystem.applyStatus(target, spec);
-        if (inst) out.statusApplied |= STATUS_BIT[rider.status] || 0;
-      }
+    if (draw100(env.rng) >= rider.chance) continue;
+
+    let duration = rider.duration;
+    if (DR_CHAIN_STATUSES.has(rider.status)) {
+      const dr = rollDrChain(target, env.step);
+      if (!dr.allowed) continue; // refused outright — no spec built, no applyStatus call
+      const bossMult = rider.status === 'stunned' && target.rank === 'boss' ? STUNNED_BOSS_DURATION_MULT : 1;
+      duration = rider.duration * bossMult * dr.multiplier * ccMultiplierOf(target);
+    } else if (!CC_REDUCTION_EXEMPT_STATUSES.has(rider.status)) {
+      duration = rider.duration * ccMultiplierOf(target);
+    }
+
+    const spec = env.statusSpec;
+    spec.status = rider.status;
+    spec.step = env.step;
+    spec.sourceId = packet.sourceId;
+    spec.sourceGen = packet.sourceGen;
+    spec.sourceSkill = packet.sourceSkillId;
+    spec.element = null;
+    spec.magnitude = rider.magnitude;
+    spec.duration = duration;
+    spec.stacks = rider.stacks || 1;
+    if (env.actorsSystem && typeof env.actorsSystem.applyStatus === 'function') {
+      const inst = env.actorsSystem.applyStatus(target, spec);
+      if (inst) out.statusApplied |= STATUS_BIT[rider.status] || 0;
     }
   }
 

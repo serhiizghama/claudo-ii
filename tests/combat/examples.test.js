@@ -593,7 +593,23 @@ test('03.E13 — level-10 Runeblade imbued hit', async () => {
   // prose states, guaranteed by the deterministic rng, not by chance.
   const { combat } = await fixtures.makeCombat([source, target], 0.5);
 
-  const packet = combat.buildAttackPacket(source, 'rune_strike', 5);
+  // CMBT-10/D-59: `skillId` here was `'rune_strike'` before this ticket, back
+  // when `buildAttackPacket` ignored every skill's own `weaponDamage` curve
+  // (the ticket's own "gap 1"). `03` §12/E13's own printed step table has NO
+  // B2 row at all (B1 12.5000 -> B3 x1.35 directly) — it is `03`'s own
+  // generic "a level-10 Runeblade lands a weapon hit while imbued" example,
+  // independent of which skill produced the swing (`impl/rune_strike.js`'s
+  // own header, written ahead of this ticket, already calls this out
+  // verbatim: "E13 is not, read literally, a worked rune_strike cast").
+  // `rune_strike` NOW carries a real 115%+7%/L coefficient (this ticket's
+  // own acceptance criterion), so passing it here would apply a x1.43 B2
+  // multiply E13's own worked numbers never had — `'attack'` (the same
+  // basic-attack id E01/E03 already use in this file) reproduces the
+  // intended "no B2 step" reading exactly, with every number below
+  // unchanged. A REAL `rune_strike` cast (`tests/skills/rune_strike.test.js`
+  // Part 2) now legitimately produces MORE damage than this — reported, not
+  // reconciled, per that file's own header.
+  const packet = combat.buildAttackPacket(source, 'attack', 5);
   assert.ok(packet, '03.E13 buildAttackPacket must succeed');
 
   const b1 = (WEAPONS.sword_rune_normal.minDamage + WEAPONS.sword_rune_normal.maxDamage) / 2;

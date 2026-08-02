@@ -225,17 +225,36 @@ function computeNextTickStep(actor, appliedStep, tickIntervalSteps) {
   return next;
 }
 
+/** `03-combat-math.md` §7.10, verbatim: "`cursed` ... `defensePercent −=
+ * magnitude`; all six resists `−= magnitude × 0.375`" — `cursed` is the ONE
+ * status among `chilled`/`slowed`/`blinded`/`cursed` (every `refresh`-family,
+ * `statMods`-carrying row in `01 §7.2`) whose listed keys do NOT all share
+ * the same coefficient. Verified against `03` §7 in full for this ticket
+ * (CMBT-9/D-55, defect A): `chilled` §7.1 ("movementSpeed −= magnitude",
+ * "increasedAttackSpeed −= magnitude", "fasterCastRate −= magnitude" — full
+ * magnitude on every listed key), `slowed` §7.8 ("magnitude | % movementSpeed
+ * reduction" — full magnitude, the one key it lists IS the reduction),
+ * `blinded` §7.10 ("attackRatingPercent −= magnitude" — full magnitude, one
+ * key) are each internally uniform; `cursed` alone splits into a
+ * full-magnitude key (`defensePercent`) and six ×0.375 keys (the resists).
+ * Fixed here: the previous blanket `mods[key] = -magnitude` gave `cursed`(40)
+ * a −40 to all six resists instead of the documented −15 (`40 × 0.375`), a
+ * 2.67× over-application (see this ticket's report).
+ */
+const CURSED_RESIST_COEFFICIENT = 0.375;
+
 /** Builds the `statMods` partial StatBlock for a freshly-applied or
  * refreshed instance, straight off `data/statuses.js#STATUS_TABLE`'s own
  * `statMods` key list — every listed key is a negative contribution of
  * `magnitude` (a documented assumption: every current status is a
  * reduction/debuff, `01 §7.2`'s own wording — "−= magnitude" for chilled is
- * the literal spec text this generalizes). `poisoned`'s `lifeRegen` is the
- * one fixed-to-0 exception (it is not a function of `magnitude` — see
- * `01 §7.2`: "`lifeRegen` set to 0"), included for spec fidelity even though
- * nothing reads it yet (see the file header). Returns `null` when the table
- * lists no keys (burning/poisoned-without-the-fixed-field/shocked/stunned/
- * bleeding/frozen).
+ * the literal spec text this generalizes), EXCEPT `cursed`'s six resist keys,
+ * which take `magnitude × CURSED_RESIST_COEFFICIENT` instead — see that
+ * constant's own comment. `poisoned`'s `lifeRegen` is the one fixed-to-0
+ * exception (it is not a function of `magnitude` — see `01 §7.2`: "`lifeRegen`
+ * set to 0"), included for spec fidelity even though nothing reads it yet
+ * (see the file header). Returns `null` when the table lists no keys
+ * (burning/poisoned-without-the-fixed-field/shocked/stunned/bleeding/frozen).
  * @param {string} status
  * @param {number} magnitude
  * @returns {object | null}
@@ -245,7 +264,13 @@ function buildStatMods(status, magnitude) {
   const keys = STATUS_TABLE[status].statMods;
   if (keys.length === 0) return null;
   const mods = {};
-  for (const key of keys) mods[key] = -magnitude;
+  if (status === STATUS.cursed) {
+    for (const key of keys) {
+      mods[key] = key === 'defensePercent' ? -magnitude : -(magnitude * CURSED_RESIST_COEFFICIENT);
+    }
+  } else {
+    for (const key of keys) mods[key] = -magnitude;
+  }
   return mods;
 }
 
@@ -627,22 +652,51 @@ export function expireBySource(actor, sourceId) {
  * reapply-immunity window; ACTR-10/combat both populate `ccImmuneUntil` per
  * `pool.js`'s own field comment). Never reads a clock; `step` is the
  * caller's `ctx.time.step`, exactly like `integrateVessels(actor, step)`.
- * NOT wired into any real `fixedUpdate` here — `src/actors/index.js` is not
- * in this ticket's file list; see the report.
+ * Wired into `ActorsSystem.fixedUpdate` (ACTR-21/O-67) — once per live actor
+ * per real fixed step, so its own `Alloc: no` cost matters here for the
+ * first time.
+ *
+ * Inlines `compactRemove`'s own compaction loop rather than calling it with
+ * two arrow-function closures (`shouldRemove`/`onRemoved`, each closing over
+ * `step`/`frozenExpired`) — measured directly for THIS ticket at ~1.9 B/call,
+ * rock-steady across 15 warmed-up rounds at N=1 000 000, never converging
+ * toward 0 the way every OTHER closure-based method in this file already
+ * does (this file's own header: "closures ... DO converge to exactly 0
+ * within a few rounds — V8 elides those particular non-escaping closures
+ * once warm"). The difference here is that these two closures are handed to
+ * a SEPARATE function (`compactRemove`) rather than only ever called
+ * in-line, which defeats that elision — the same class of defect
+ * `tests/core/alloc.test.js`'s own "Found, and now fixed by someone else"
+ * section documents for `combat.expireBySource`'s old `.filter()` closure.
+ * `compactRemove` itself is untouched (its other three call sites —
+ * `clearStatuses`, `expireBySource` above, `removeStatus` — are not in any
+ * `fixedUpdate` hot path today, so their own closures are out of this
+ * ticket's scope to chase).
  * @param {object} actor
  * @param {number} step
  * @returns {number} instances expired
  */
 export function expireStatuses(actor, step) {
   if (!actor) return 0;
+  const list = actor.statuses;
+  let writeIdx = 0;
+  let removedCount = 0;
   let frozenExpired = false;
-  const removed = compactRemove(
-    actor,
-    (inst) => inst.expiresStep <= step,
-    (inst) => { if (inst.status === STATUS.frozen) frozenExpired = true; },
-  );
+  for (let readIdx = 0; readIdx < list.length; readIdx++) {
+    const inst = list[readIdx];
+    if (inst.expiresStep <= step) {
+      if (inst.status === STATUS.frozen) frozenExpired = true;
+      releaseInstance(inst);
+      removedCount++;
+    } else {
+      list[writeIdx] = inst;
+      writeIdx++;
+    }
+  }
+  list.length = writeIdx;
+  if (removedCount > 0) recomputeStatusMask(actor);
   if (frozenExpired) actor.ccImmuneUntil = step + FROZEN_REAPPLY_IMMUNITY_STEPS;
-  return removed;
+  return removedCount;
 }
 
 /** `ACTION_LOCKING_STATUS_MASK` / `isActionLockedByStatus` close ACTR-9's

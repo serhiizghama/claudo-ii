@@ -739,7 +739,14 @@ decision, life/mana steal, the threat tables, XP award, and the `DamagePacket` /
   the event that carried it — both are pooled and released at end of step.
 - Never mutate a packet returned by `buildAttackPacket()` other than the fields
   documented as caller-adjustable (`radius` consumers, `pierceIndex`,
-  `onHitStatus`, `knockback`, `originX/Y/Z`).
+  `onHitStatus`, `knockback`, `originX/Y/Z`, `requesterOwnsRageCredit`).
+- `requesterOwnsRageCredit` (`01-data-model.md` §8.1, default `false`) is the
+  one way a caller may opt out of R14(f)'s **attacker** rage credit, and it
+  exists for exactly one shape: a channel, whose income runs at the actor's
+  `attackInterval` cadence rather than per hit or per step (`05-skills.md`
+  §1.6 reading **R2**). Setting it means *you* credit the rage — not that no
+  rage is earned. Resonance is never affected (per landed hit, `05` D-05-2),
+  nor is the defender's `+4` per hit taken.
 - Never call `resolve()` on a target on another team's behalf to "preview"
   damage — it applies. Use `chanceToHit` and the packet's own ranges.
 

@@ -30,6 +30,8 @@ import {
   isLikelyMeleeAttack,
   addResourceClamped,
   applyOnHitEconomy,
+  shouldAwardActionRage,
+  encodeActionRageStamp,
 } from '../../src/combat/onhit.js';
 import { CombatSystem, PacketPool, computeAttackInterval } from '../../src/combat/packet.js';
 import { chanceToHit } from '../../src/combat/tohit.js';
@@ -258,14 +260,25 @@ test('applyOnHitEconomy: manaReturned = E13\'s 1.7155, applied to source.mana, c
   approx(source.mana, 21.7155, 'source.mana += manaReturned (20 + 1.7155)');
 });
 
-test('applyOnHitEconomy: a fresh Runeblade with NO gear reads manaReturnPercent=0 today — a documented gap, not this ticket\'s to fix (see the report)', () => {
+test('applyOnHitEconomy: a fresh Runeblade with NO gear reads manaReturnPercent=8 from the class base (O-84/D-53, closed by SKIL-5)', () => {
+  // Formerly "...reads manaReturnPercent=0 today — a documented gap, not
+  // this ticket's to fix": O-84 was the finding that CLASS_TABLE
+  // (src/actors/stats.js) had no manaReturnPercent row for any class, so a
+  // really-composed Runeblade read 0 no matter what. SKIL-5 closed it as a
+  // named micro-scope (ruling D-53): CLASS_TABLE now carries the Runeblade
+  // class-base 8 `03-combat-math.md:223` states ("Base manaReturnPercent
+  // for the Runeblade class is 8"), composed into StatBlock.manaReturnPercent
+  // by composeStats()'s own `base` layer — no gear, no hand-set stat, no
+  // skill point spent. This test is now a regression guard: if O-84 ever
+  // regresses (the CLASS_TABLE row removed, or the base layer stops
+  // reading it), this is the test that catches it.
   const source = makeActor({ classId: 'runeblade', id: 502 });
-  assert.equal(source.stats.manaReturnPercent, 0, 'stats.js has no CLASS_TABLE column seeding a Runeblade base of 8 yet');
+  assert.equal(source.stats.manaReturnPercent, 8, '03:223 / D-53: CLASS_TABLE now seeds the Runeblade base of 8, with no gear at all');
   const target = makeActor({ classId: null, id: 503 });
   const packet = makePacket({ sourceId: source.id, sourceGen: source.generation, manaReturnPercent: source.stats.manaReturnPercent });
   const result = blankResult({ outcome: 'hit', physical: 21.4438, total: 39 });
   applyOnHitEconomy(packet, target, result, { source, step: 0 });
-  assert.equal(result.manaReturned, 0, 'this file does not inject a Runeblade-specific base — it trusts packet.manaReturnPercent as-is');
+  approx(result.manaReturned, 1.7155, 'the class-base 8% now actually returns mana on a landed hit: 21.4438 x 0.08 = 1.7155, same figure as E13');
 });
 
 test('applyOnHitEconomy: manaReturned clamps at maxMana, never overflowing', () => {
@@ -348,6 +361,51 @@ test('applyOnHitEconomy: block/immune outcomes credit nothing (result.total is a
   }
 });
 
+// ---------------------------------------------------------------------------
+// D-52 — `packet.requesterOwnsRageCredit`, the R2 escape hatch (SKIL-7)
+// ---------------------------------------------------------------------------
+
+test('applyOnHitEconomy: packet.requesterOwnsRageCredit=true skips the ATTACKER\'s rage award only — Resonance and the defender\'s own rage are untouched', () => {
+  const attacker = makeActor({ classId: 'ravager', id: 950 });
+  attacker.stats.maxResonance = 10; // force nonzero so the Resonance assertion below is meaningful — see the R1 4-body test's own precedent
+  const defender = makeActor({ classId: 'ravager', id: 951, team: 1 });
+  const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation, requesterOwnsRageCredit: true });
+  const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+
+  applyOnHitEconomy(packet, defender, result, { source: attacker, step: 0 });
+
+  assert.equal(attacker.rage, 0, 'attacker rage NOT credited — the requester owns it');
+  assert.equal(attacker.resonance, 1, 'Resonance still credits — D-05-2, never gated by this flag');
+  assert.equal(defender.rage, 4, 'defender rage-on-take-hit still credits — this flag is attacker-only');
+});
+
+test('applyOnHitEconomy: requesterOwnsRageCredit=true suppresses the attacker\'s rage credit across MULTIPLE hits from the same packet, in the same step — the exact whirlwind scenario', () => {
+  const attacker = makeActor({ classId: 'ravager', id: 952 });
+  attacker.stats.maxResonance = 10; // see the note above
+  const targets = [makeActor({ classId: 'ravager', id: 953, team: 1 }), makeActor({ classId: 'ravager', id: 954, team: 1 }), makeActor({ classId: 'ravager', id: 955, team: 1 })];
+  const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation, requesterOwnsRageCredit: true });
+
+  for (const target of targets) {
+    const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+    applyOnHitEconomy(packet, target, result, { source: attacker, step: 777 });
+  }
+
+  assert.equal(attacker.rage, 0, 'zero attacker rage from combat across all 3 targets — the requester (skills) owns the credit entirely, on its own cadence');
+  assert.equal(attacker.resonance, 3, 'Resonance still credits once per landed hit regardless (3 hits, +1 each)');
+});
+
+test('applyOnHitEconomy: requesterOwnsRageCredit is false by default (an omitted field never suppresses the existing behaviour)', () => {
+  const attacker = makeActor({ classId: 'ravager', id: 956 });
+  const defender = makeActor({ classId: 'ravager', id: 957, team: 1 });
+  const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation });
+  assert.equal(packet.requesterOwnsRageCredit, false, 'sanity: PacketPool/resetPacketFields default it to false');
+  const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+
+  applyOnHitEconomy(packet, defender, result, { source: attacker, step: 0 });
+
+  assert.equal(attacker.rage, 6, 'every existing caller (no field set) is unaffected — combat credits exactly as before');
+});
+
 test('applyOnHitEconomy: a killing blow (result.killed=true) still credits rage/resonance normally — R14(f) precedes R14(i)\'s death check', () => {
   const attacker = makeActor({ classId: 'ravager', id: 900 });
   const defender = makeActor({ classId: 'ravager', id: 901, team: 1 });
@@ -357,6 +415,152 @@ test('applyOnHitEconomy: a killing blow (result.killed=true) still credits rage/
   applyOnHitEconomy(packet, defender, result, { source: attacker, step: 0 });
 
   assert.equal(attacker.rage, 6, 'the landed-hit credit still fires even though this hit kills the target');
+});
+
+// ---------------------------------------------------------------------------
+// CMBT-8 / D-51 — R1's per-ACTION rage guard (Defect A)
+// ---------------------------------------------------------------------------
+
+// D-52 (SKIL-7's finding, fixed here): the ORIGINAL CMBT-8/D-51 fallback
+// for `actionId === null` awarded UNCONDITIONALLY on every call, with no
+// bookkeeping at all — correct for a `bone_ranker`'s own single-target
+// swing (one hit, one call), but wrong the instant an actionId-less
+// attacker resolves more than one landed hit in the same fixed step
+// (`05-skills.md` §12.1's own bug, one layer down — a channel is exactly
+// such an attacker, since it structurally cannot use `beginAction`).
+// Tightened to `(generation, step)`: one award per SIMULATION STEP.
+
+test('shouldAwardActionRage: actionId === null, DIFFERENT steps — each step is its own credit (a lone swing, one per step, still always awards)', () => {
+  const source = makeActor({ classId: 'ravager', id: 5000 });
+  assert.equal(source.actionId, null, 'sanity: pool.js default — this actor never called beginAction');
+  assert.equal(shouldAwardActionRage(source, 100), true);
+  assert.equal(shouldAwardActionRage(source, 101), true, 'a new step — a fresh credit, even with no actionSeq to key on');
+  assert.equal(shouldAwardActionRage(source, 102), true);
+});
+
+test('shouldAwardActionRage: actionId === null, SAME step, multiple hits — D-52\'s own fix: credited once, not once per hit (05 §12.1, one layer down)', () => {
+  const source = makeActor({ classId: 'ravager', id: 5099 });
+  assert.equal(source.actionId, null);
+  assert.equal(shouldAwardActionRage(source, 200), true, 'first landed hit this step — credited');
+  assert.equal(shouldAwardActionRage(source, 200), false, 'second landed hit, SAME step — suppressed (this is the whole point of D-52)');
+  assert.equal(shouldAwardActionRage(source, 200), false, 'third landed hit, SAME step — still suppressed');
+  assert.equal(shouldAwardActionRage(source, 201), true, 'the NEXT step is a fresh credit again');
+});
+
+test('shouldAwardActionRage: a real tracked action (actionId set) awards ONCE for the SAME (generation, actionSeq), suppressing every repeat', () => {
+  const source = makeActor({ classId: 'ravager', id: 5001 });
+  source.actionId = 'cleaving_strike'; // as if actors.beginAction() just ran
+  source.actionSeq = 1;
+
+  assert.equal(shouldAwardActionRage(source), true, 'first landed hit of this action — credited');
+  assert.equal(shouldAwardActionRage(source), false, 'second target, SAME action — suppressed');
+  assert.equal(shouldAwardActionRage(source), false, 'third target, SAME action — still suppressed');
+});
+
+test('shouldAwardActionRage: a NEW actionSeq (a second cast by the same actor) is credited again', () => {
+  const source = makeActor({ classId: 'ravager', id: 5002 });
+  source.actionId = 'cleaving_strike';
+  source.actionSeq = 1;
+  assert.equal(shouldAwardActionRage(source), true);
+  assert.equal(shouldAwardActionRage(source), false);
+
+  source.actionSeq = 2; // actors.beginAction() bumped it for a genuinely new cast
+  assert.equal(shouldAwardActionRage(source), true, 'a new action must be credited even though actionId did not change');
+});
+
+test('shouldAwardActionRage: recycling the pool slot (generation bump) must not suppress a real award, even if the new occupant\'s actionSeq happens to repeat', () => {
+  const source = makeActor({ classId: 'ravager', id: 5003 });
+  source.actionId = 'cleaving_strike';
+  source.actionSeq = 1;
+  assert.equal(shouldAwardActionRage(source), true);
+  assert.equal(shouldAwardActionRage(source), false, 'suppressed within the same (generation, actionSeq)');
+
+  source.generation = source.generation + 1; // pool.js#resetActorRecord's own bump on recycle
+  source.actionSeq = 1; // the fresh occupant's own first action can coincidentally start at 1 again
+  assert.equal(shouldAwardActionRage(source), true, 'a stale stamp from the PREVIOUS generation must never suppress the new occupant');
+});
+
+test('encodeActionRageStamp: packs (generation, actionSeq) into one float, distinct for distinct pairs', () => {
+  assert.notEqual(encodeActionRageStamp(0, 1), encodeActionRageStamp(1, 1), 'different generation, same actionSeq');
+  assert.notEqual(encodeActionRageStamp(0, 1), encodeActionRageStamp(0, 2), 'same generation, different actionSeq');
+  assert.equal(encodeActionRageStamp(0, 1), encodeActionRageStamp(0, 1));
+});
+
+test('applyOnHitEconomy: R1 — a cleaving_strike-shaped action (SAME actionId/actionSeq) resolved against 4 targets credits attacker rage EXACTLY ONCE (6, not 4x6=24), while Resonance still credits on EVERY landed hit (D-05-2)', () => {
+  const attacker = makeActor({ classId: 'ravager', id: 6000 });
+  attacker.stats.maxResonance = 10; // force both resources nonzero on one actor to prove both rules in a single run — addResourceClamped is class-agnostic, driven only by stats.maxRage/maxResonance (see onhit.js's own header)
+  attacker.actionId = 'cleaving_strike'; // as if actors.beginAction() just ran once for this cast
+  attacker.actionSeq = 1;
+
+  const targets = [6001, 6002, 6003, 6004].map((id) => makeActor({ classId: null, id, team: 1 }));
+  const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation });
+
+  for (const target of targets) {
+    const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+    applyOnHitEconomy(packet, target, result, { source: attacker, step: 0 });
+  }
+
+  assert.equal(attacker.rage, 6, 'ONE per-action award, not the old per-target 4 x 6 = 24 bug');
+  assert.equal(attacker.resonance, 4, 'Resonance credits on EVERY landed hit — 4, not 1');
+});
+
+test('applyOnHitEconomy: D-52 — an actionId-less attacker (no beginAction, e.g. a bone_ranker OR a channel with no packet flag set) resolving 4 landed hits in the SAME step credits rage EXACTLY ONCE, not 4x (05 §12.1\'s bug, one layer down, now fixed at the source)', () => {
+  const attacker = makeActor({ classId: 'ravager', id: 6050 });
+  attacker.stats.maxResonance = 10; // see the note above
+  assert.equal(attacker.actionId, null, 'sanity: never routed through beginAction');
+
+  const targets = [6051, 6052, 6053, 6054].map((id) => makeActor({ classId: null, id, team: 1 }));
+  const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation }); // requesterOwnsRageCredit NOT set — the general-purpose fallback is what's under test here
+
+  for (const target of targets) {
+    const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+    applyOnHitEconomy(packet, target, result, { source: attacker, step: 42 }); // all 4 in the SAME step
+  }
+
+  assert.equal(attacker.rage, 6, 'ONE per-STEP award (D-52), not the per-target 4 x 6 = 24 bug the old unconditional fallback allowed');
+  assert.equal(attacker.resonance, 4, 'Resonance still credits on every landed hit regardless');
+});
+
+test('applyOnHitEconomy: R1 — the rage award is IDENTICAL whether the action resolves against 1, 4 or 8 bodies (03-combat-math.md §12.1\'s own lock)', () => {
+  function runCone(bodyCount, actionSeq) {
+    const attacker = makeActor({ classId: 'ravager', id: 7000 + actionSeq });
+    attacker.actionId = 'cleaving_strike';
+    attacker.actionSeq = actionSeq;
+    const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation });
+    for (let i = 0; i < bodyCount; i++) {
+      const target = makeActor({ classId: null, id: 7100 + actionSeq * 100 + i, team: 1 });
+      const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+      applyOnHitEconomy(packet, target, result, { source: attacker, step: 0 });
+    }
+    return attacker.rage;
+  }
+
+  const rage1 = runCone(1, 1);
+  const rage4 = runCone(4, 1); // a fresh actor per call, same actionSeq value is fine — different (poolIndex, generation)
+  const rage8 = runCone(8, 1);
+
+  assert.equal(rage1, 6);
+  assert.equal(rage4, 6);
+  assert.equal(rage8, 6);
+  // eslint-disable-next-line no-console
+  console.log(`R1 lock: rage after 1/4/8-body cleaving_strike-shaped action = ${rage1}/${rage4}/${rage8} (all must equal BASE_RAGE_ON_HIT=${BASE_RAGE_ON_HIT})`);
+});
+
+test('applyOnHitEconomy: the defender still gains its own +4 rage on EVERY hit taken, unaffected by the attacker\'s per-action guard', () => {
+  const attacker = makeActor({ classId: 'ravager', id: 8000 });
+  attacker.actionId = 'cleaving_strike';
+  attacker.actionSeq = 1;
+  const packet = makePacket({ sourceId: attacker.id, sourceGen: attacker.generation });
+
+  const targets = [8001, 8002, 8003, 8004].map((id) => makeActor({ classId: 'ravager', id, team: 1 }));
+  for (const target of targets) {
+    const result = blankResult({ outcome: 'hit', physical: 20, total: 20 });
+    applyOnHitEconomy(packet, target, result, { source: attacker, step: 0 });
+  }
+
+  for (const target of targets) {
+    assert.equal(target.rage, 4, `target #${target.id} must gain its own +4 per hit taken, independent of the attacker's guard`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -495,8 +699,11 @@ test('CombatSystem#resolve, driven through a real init(), applies R14(d)/(f) end
 
   const packet = combat.buildAttackPacket(attacker, 'attack', 0);
   packet.team = attacker.team;
-  setSourceLayer(attacker, 'equipment', { manaReturnPercent: 8 });
-  composeStats(attacker);
+  // manaReturnPercent is NOT hand-set here any more: O-84/D-53 (SKIL-5)
+  // added the Runeblade class-base 8 to CLASS_TABLE (src/actors/stats.js),
+  // so makeActor()'s own composeStats() call already put 8 on
+  // attacker.stats.manaReturnPercent with no gear at all — setting it again
+  // here would double it (8 + 8 = 16).
   packet.manaReturnPercent = attacker.stats.manaReturnPercent;
   packet.attackRating = 0; // always hits — isolates this test from the RNG to-hit draw
   packet.blockable = false;

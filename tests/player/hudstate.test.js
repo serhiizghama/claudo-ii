@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 import { boot } from '../../src/main.js';
 import { PlayerSystem } from '../../src/player/index.js';
 import { CLASS_TABLE } from '../../src/actors/stats.js';
+import { RAGE_DECAY_PER_SECOND } from '../../src/player/progress.js';
 
 /** Matches tests/player/plyr1.test.js's own stub canvas. */
 function makeCanvas(width = 1280, height = 720) {
@@ -302,24 +303,51 @@ test('hudState(): an emberwright actor (no secondary resource) gets secondaryKin
 });
 
 // ---------------------------------------------------------------------------
-// secondaryDecay — still at its contract default. Not O-57 (closed): it
-// needs `inCombat` (itself left at the literal's default per this ticket's
-// own brief) plus decay-rate data that is private to src/actors/vessels.js.
-// See the file header's "PLYR-10 addendum" for the full reasoning; this test
-// documents TODAY's value, not a permanent fact (O-27).
+// secondaryDecay — O-83 closed by PLYR-4. This test used to document the
+// still-blocked default (docs/PROGRESS.md O-27: "a default, not a permanent
+// fact") — PLYR-4 is the ticket that closes it, so the assertion below is
+// updated to the real, computed value rather than the old literal default.
+// See src/player/progress.js's own header for `computeSecondaryDecay`.
 // ---------------------------------------------------------------------------
 
-test('hudState(): secondaryDecay holds the HudState literal\'s own default today (still blocked, not on O-57)', async () => {
+test('hudState(): secondaryDecay reflects the real out-of-combat rage decay rate (O-83 closed)', async () => {
   const { ctx } = await bootGame();
   const player = ctx.get('player');
   const actor = player.actor;
-  actor.rage = 90; // proves this isn't "no secondary resource" — secondary IS live, decay still defaults
+  actor.rage = 90; // nonzero — proves this isn't "no secondary resource"
+  // A fresh boot's actor has never dealt/taken damage (lastDamageStep/
+  // lastDealtStep both -1) — computeInCombat treats "never fought" as out
+  // of combat (see progress.js), so decay applies: -RAGE_DECAY_PER_SECOND.
 
   const hud = player.hudState();
+  assert.equal(hud.inCombat, false);
+  assert.equal(hud.secondaryDecay, -RAGE_DECAY_PER_SECOND);
+});
+
+test('hudState(): secondaryDecay is 0 while inCombat (recent damage dealt/taken)', async () => {
+  const { ctx } = await bootGame();
+  const player = ctx.get('player');
+  const actor = player.actor;
+  actor.rage = 90;
+  actor.lastDealtStep = ctx.time.step; // just fought
+
+  const hud = player.hudState();
+  assert.equal(hud.inCombat, true);
   assert.equal(hud.secondaryDecay, 0);
 });
 
-test('hudState(): fields owned by systems landing M4/M6 hold the HudState literal\'s own defaults today', async () => {
+test('hudState(): secondaryDecay is 0 once the secondary resource is already drained', async () => {
+  const { ctx } = await bootGame();
+  const player = ctx.get('player');
+  const actor = player.actor;
+  actor.rage = 0;
+
+  const hud = player.hudState();
+  assert.equal(hud.inCombat, false);
+  assert.equal(hud.secondaryDecay, 0);
+});
+
+test('hudState(): a fresh level-1 actor with no XP granted reads the HudState literal\'s own default values (xp/xpFloor/xpCeiling/xpTotal/statPoints/skillPoints real now, PLYR-4 — they simply equal the defaults at level 1 with 0 XP); gold/questStep still owned by systems landing M4/M6', async () => {
   const { ctx } = await bootGame();
   const player = ctx.get('player');
   const hud = player.hudState();

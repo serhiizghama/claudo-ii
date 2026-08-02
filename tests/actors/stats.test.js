@@ -138,10 +138,16 @@ test('E14 — the layer stack: each of the six source layers contributed exactly
 
   // base — class archetype x level (03 §2.1 Ravager column: start
   // 30/20/25/10, class regen rates as percent, secondary resource base
-  // maxRage 100 per §2.4).
+  // maxRage 100 per §2.4). `manaReturnPercent: 0` added to this literal by
+  // SKIL-5 (O-84/D-53): CLASS_TABLE now carries a manaReturnPercent row for
+  // every class (Runeblade 8, Ravager/Emberwright 0 — 03:223 gives no base
+  // for the other two, so D-53 gives them nothing rather than inventing a
+  // number), so the base layer's own shape grew this one key. The Ravager
+  // VALUE is unchanged (0); only the key's presence is new.
   assert.deepEqual(actor.sources.base, {
     strength: 30, dexterity: 20, vitality: 25, energy: 10,
     lifeRegenPercent: 0.6, manaRegenPercent: 2.0, maxRage: 100, maxResonance: 0,
+    manaReturnPercent: 0,
   }, 'base layer must be exactly the Ravager class row at clvl 1, before any allocation');
 
   // allocated — the reference allocation's 12 level-ups.

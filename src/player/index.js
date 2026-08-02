@@ -198,37 +198,60 @@
 // so `secondary`/`maxSecondary` stay at 0 in that case — correct, not a
 // missing accessor.
 //
-// `secondaryDecay` is the one field STILL left at its contract default
-// (`0`), and NOT because of O-57 — that gap is closed. `09-ui.md` §16.4 says
-// plainly the rage orb's decay arrow is *gated* by `inCombat`, and this
-// ticket's own brief explicitly keeps `inCombat` at the literal's default
-// (below) because computing it needs combat's in-combat-window formula,
-// which nothing wires into `player` yet. The actual decay RATE
-// (`RAGE_DECAY_PER_SECOND`/`RESONANCE_DECAY_PER_SECOND`) is private data
-// inside `src/actors/vessels.js`, not exposed by `ActorsSystem` the way
-// `stats()` now is — importing that module directly would be the same rule-2
-// violation round 1 refused, and re-typing the numbers here would be the
-// same rule-9 drift risk `secondaryKind` above avoided. So `secondaryDecay`
-// stays at its literal default until either `inCombat` gets a real owner or
-// `actors` exposes the decay rate the same way `stats()` now exposes the
-// `StatBlock`. See this ticket's report.
+// `secondaryDecay`/`inCombat` were, at PLYR-3 time, left at their contract
+// defaults (O-83): `09-ui.md` §16.4 says plainly the rage orb's decay arrow
+// is gated by `inCombat`, but nothing computed it, and the decay RATE
+// (`RAGE_DECAY_PER_SECOND`/`RESONANCE_DECAY_PER_SECOND`) was private data
+// inside `src/actors/vessels.js`, not exposed by `ActorsSystem`.
 //
-// Every other field either has an explicit contract default per this
-// ticket's brief (`hotbar`/`cooldowns`/`xp`/`xpFloor`/`xpCeiling`/`xpTotal`/
-// `statPoints`/`skillPoints`/`gold`/`questStep`/`belt` — owned by systems
-// landing M4/M6) or has no owning feature wired into `player` yet
-// (`level`/`targetId`/`difficulty`/`zoneId`/`name`/`classId`/`inCombat` —
-// none of these were named in the brief's "must be true" list, and each
-// needs something this ticket does not own: target selection, the
-// `difficulty` property's own M6 ticket, zone tracking, or duplicating
-// combat's in-combat window formula) — all left at the literal's own
-// defaults, per O-27 (a default is honestly documented as today's contract
-// value, never asserted as a permanent fact).
+// ---------------------------------------------------------------------------
+// PLYR-4 addendum — O-83 closed: `inCombat`/`secondaryDecay` are real
+// ---------------------------------------------------------------------------
+// `./progress.js` transcribes `RAGE_DECAY_PER_SECOND`/
+// `RESONANCE_DECAY_PER_SECOND` from `03-combat-math.md` §2.4 (matching the
+// live, private constants at `src/actors/vessels.js:91,93` — not imported,
+// `actors` owns that file; pinned to it by a live-behaviour test instead,
+// see `./progress.js`'s own header) and `computeInCombat`, the same
+// "now - max(lastDamageStep, lastDealtStep) < 4.0 s" formula
+// `vessels.js#isInCombat` runs privately. `computeSecondaryDecay` mirrors
+// `vessels.js#decayOutOfCombat`'s exact gating, so the exposed rate always
+// matches what the NEXT fixed step's real decay (already running, ACTR-21)
+// will do. `level`/`statPoints`/`skillPoints`/`xp`/`xpFloor`/`xpCeiling`/
+// `xpTotal` are also real now — `ProgressTracker` (`./progress.js`) tracks
+// them and `PlayerSystem.fixedUpdate` runs its level-up check every fixed
+// step (`11-flows.md` §8).
+//
+// Every other field still has an explicit contract default per PLYR-3's own
+// brief (`gold`/`questStep`/`belt` — owned by systems landing M4/M6) or has
+// no owning feature wired into `player` yet (`targetId`/`difficulty`/
+// `zoneId`/`name`/`classId` — each needs something outside this ticket's
+// scope too: target selection, the `difficulty` property's own M6 ticket,
+// or zone tracking) — left at the literal's own defaults, per O-27 (a
+// default is honestly documented as today's contract value, never asserted
+// as a permanent fact).
 
 // PLYR-2: the real path-following state machine. Same directory, not a
 // cross-subsystem import (hard rule 2 only forbids reaching into another
 // subsystem's own module) — see move.js's own header.
 import { PathFollower, computeArriveRadius } from './move.js';
+
+// PLYR-3: hotbar/cast-order/targeting state machine — see cast.js's own
+// header for the full design (the five targeting modes, cost-at-cast-start,
+// the held-repeat mechanism, the weapon-range gap in `items`).
+import { CastController, createHotbar, HOTBAR_SLOT_COUNT, isHostile } from './cast.js';
+
+// PLYR-4: resources/decay/level-up — see progress.js's own header for the
+// full design (`11-flows.md` §8's level-up sequence, O-83's decay/inCombat
+// exposure). `XP_TABLE` (D-38, `./data/progression.js`) is read directly
+// here for `hudState()`'s `xpFloor`/`xpCeiling` — everything else about the
+// curve goes through `ProgressTracker`.
+import {
+  ProgressTracker,
+  computeInCombat,
+  computeSecondaryDecay,
+  LEVEL_CAP,
+} from './progress.js';
+import { XP_TABLE } from './data/progression.js';
 
 const DEG2RAD = Math.PI / 180;
 
@@ -240,6 +263,15 @@ const MOVE_BUTTON = 0;
 /** `src/core/input.js`'s pre-registered code for the stop order (§3.2 row 3,
  * "S"). */
 const STOP_KEY_CODE = 'KeyS';
+
+/** `PointerEvent.button` for the cast trigger — `05-skills.md` §1.4: "right
+ * mouse casts the skill bound to `hotbar.rightMouse`". */
+const CAST_BUTTON = 2;
+
+/** `src/core/input.js`'s pre-registered codes for hotbar slots 1-4
+ * (`05-skills.md` §1.4: "keys 1-4 fire hotbar slots at the cursor"). Index
+ * `i` casts hotbar slot `i`. */
+const DIGIT_KEY_CODES = ['Digit1', 'Digit2', 'Digit3', 'Digit4'];
 
 /** Raw `KeyboardEvent.code` for the modifier `11-flows.md` §3.3 calls
  * "Shift held" as a single condition — CORE-7 deliberately tracks the two
@@ -258,6 +290,23 @@ const SHIFT_RIGHT_CODE = 'ShiftRight';
 /** Metres. `world.groundHeight` does not exist (M1/M5) — this ticket's
  * boundary is a literal flat plane. See the file header. */
 const GROUND_Y = 0;
+
+/** `11-flows.md` §3.3 step 5, verbatim: "physics.overlapCircle(gx, gz, 0.65,
+ * MASK.ACTORS, scratch)". */
+const HOVER_PICK_RADIUS_M = 0.65;
+
+/** Preallocated `overlapCircle` `out`-array capacity for the hover pick —
+ * generously above what a 0.65 m circle can ever contain (pack-occupancy
+ * bodies are 0.22-0.60 m radius, `05-skills.md` §1.5). */
+const HOVER_PICK_CAPACITY = 16;
+
+/** `01-data-model.md` §2.1, `ACTOR_FLAG.untargetable`. Not exposed via
+ * `actors`' public surface — same "hardcode the one field, cite the
+ * source" precedent `PLACEHOLDER_TEAM` below already sets. `isHostile`
+ * (the team-comparison half of §3.3 step 5's selection rule) is imported
+ * from `./cast.js` above rather than re-derived here, so the two files
+ * never carry two independently-drifting copies of the same formula. */
+const ACTOR_FLAG_UNTARGETABLE = 1 << 1;
 
 /** A ray this close to horizontal never happens at the fixed 52° camera
  * pitch; guarded anyway so a future camera-peek perturbation can never
@@ -279,6 +328,22 @@ const CAMERA_DEAD_ZONE_M = 1.5;
  * placeholder spawned in `init()` only when no player actor already exists. */
 const PLACEHOLDER_ARCHETYPE_ID = 'ravager';
 const PLACEHOLDER_TEAM = 0; // TEAM.player, 01-data-model.md §1.2
+
+/** PLYR-4 fix — a fresh character starts at level 1 (`13-progression-lore.md`
+ * §1's whole spine, `XP_TABLE[1] === 0`). Without this, the spawn call below
+ * omitted `level` entirely, so `actors.spawn()`'s merge
+ * (`src/actors/index.js#spawn`, `{ ...SPAWN_SPEC_DEFAULTS, ...spec }`) fell
+ * through to `SPAWN_SPEC_DEFAULTS.level: 10` — a MONSTER-oriented default
+ * (`02-api-contracts.md` §7's own `SpawnSpec` sample; `archetypeId` and
+ * `kind` default to a monster too) that this placeholder call already
+ * overrides for every other field except this one. That silent 10 was
+ * harmless before `ProgressTracker` existed (nothing else read `actor.level`
+ * as a source of truth for the player), but became actively harmful once
+ * PLYR-4 landed: the FIRST `checkLevelUp()` call overwrote it with the
+ * tracker's own (previously hardcoded) starting level, shrinking
+ * `maxLife`/`maxMana` on the player's very first XP gain. See this ticket's
+ * report. */
+const PLACEHOLDER_LEVEL = 1;
 
 /**
  * `02-api-contracts.md` §13's `Intent` shape, verbatim defaults. Every field
@@ -409,21 +474,39 @@ export function intersectPlaneY(origin, dir, planeY) {
 
 export class PlayerSystem {
   static id = 'player';
-  // `02-api-contracts.md` §13's real deps are
-  // `['actors','nav','skills','items','world']` — trimmed here to what is
-  // actually registered today, the exact precedent `src/actors/index.js`
-  // (ACTR-1) already set for `materials`: declaring an unregistered id
-  // throws out of `Registry.resolve()` before anything boots
-  // (`src/core/registry.js`). `render` is not in the contract's own deps
-  // list either (this file reaches it via `ctx.get('render')` at runtime,
-  // never a static import — rule 2) and does not need to be: `src/main.js`
+  // `02-api-contracts.md` §13's real deps: `['actors','nav','skills',
+  // 'items','world']`. O-61 (docs/PROGRESS.md): this array used to be
+  // trimmed to `['actors','nav']` — everything `skills`/`items`/`world`
+  // still not registered as of M0/M1. All five are real subsystems now
+  // (M2-M4 accepted); this ticket (PLYR-3) restores the full list.
+  // `render` stays out of it deliberately — it is not in the CONTRACT's own
+  // deps list either (reached via `ctx.get('render')` at runtime, never a
+  // static import — rule 2), and does not need to be: `src/main.js`
   // registers `render` before `player` (B4's registration order), and
   // `Registry.resolve()`'s DFS ties are broken by registration order, so
-  // `render` is guaranteed initialized first regardless. `nav` (PLYR-2
-  // addendum) IS real and registered now (NAV-1..5, all accepted) — added
-  // here as a genuine hard dependency, not a runtime-only `ctx.get`, so
-  // `init()` below can cache it exactly like `this._actors`.
-  static deps = ['actors', 'nav'];
+  // `render` is guaranteed initialized first regardless.
+  //
+  // O-89's warning (SKIL-8: "adding a dep drags its whole chain into every
+  // light-Registry test and broke three of them; it reverted and used
+  // ctx.peek() instead") does NOT apply the same way here — checked
+  // directly: no test anywhere constructs `PlayerSystem` through a
+  // trimmed/light `Registry` (the two places `PlayerSystem` is imported
+  // outside `tests/player/` — `tests/ui/inventory.perf.test.js`,
+  // `tests/ui/sheet.test.js` — never mention it; the only direct,
+  // non-`boot()` construction is `tests/player/hudstate.test.js`'s bare
+  // `new PlayerSystem()`, which never touches `Registry`/`static deps` at
+  // all). This file ALSO never caches `skills`/`items`/`world` from
+  // `init()` (every use above is `ctx.peek('skills')` /
+  // `ctx.peek('items')` at call time, inside `fixedUpdate`/`update`/
+  // `hudState` — see `castOrder`/`_followCast`/`hudState`'s own comments),
+  // so correctness never depended on this change either; it is made purely
+  // to match the contract and guarantee init ORDER (skills/items/world
+  // fully initialized before `player`), not because anything here would
+  // break without it. Verified: full `npm run test:unit` (1914) and
+  // `npm run test:perf` (144) both still pass with this restored, run
+  // immediately before and after the change for comparison. See this
+  // ticket's report.
+  static deps = ['actors', 'nav', 'skills', 'items', 'world'];
 
   constructor() {
     this._ctx = null;
@@ -433,6 +516,13 @@ export class PlayerSystem {
     this._actor = null;
 
     this._controlEnabled = true;
+
+    /** Latched every `_latchIntent` (`update()`) call — see `isShiftHeld`'s
+     * own doc comment. Initialized here (not just assigned inside
+     * `_latchIntent`) so `_followCast`'s `deps.shiftHeld` read is never
+     * `undefined` on a `fixedUpdate` that runs before this instance's first
+     * real `update()` frame (a direct `castOrder()` call in a test, e.g.). */
+    this._shiftHeld = false;
 
     this._intent = createIntent();
     /** last `intent.sequence` value `fixedUpdate`'s ladder dispatch has
@@ -460,11 +550,42 @@ export class PlayerSystem {
     this._rayOrigin = { x: 0, y: 0, z: 0 };
     this._rayDir = { x: 0, y: 0, z: 0 };
 
-    /** No `overlapCircle` exists yet (`physics`, PHYS-3) — actor picking
-     * (§3.3 step 5) is out of this ticket's scope (see the file header's
-     * boundary table), so this never becomes anything but 0. Still exposed
-     * as the contract's own property, honestly inert rather than faked. */
+    /** PLYR-3: `hoverTarget` -> `int actorId`, 0 when none. Recomputed once
+     * per `update()` frame by `_updateHoverTarget` (`11-flows.md` §3.3 step
+     * 5) — `physics.overlapCircle` now exists (PHYS-3, accepted). Never
+     * touched from `fixedUpdate` (`hoverTarget`'s own contract row is
+     * `Fixed: N`). */
     this._hoverTarget = 0;
+    // Reused every frame by `_updateHoverTarget` — zero allocation
+    // (ARCHITECTURE.md rule 6).
+    this._hoverScratch = new Int32Array(HOVER_PICK_CAPACITY);
+
+    /** PLYR-3 — `01-data-model.md` §6.4 `Hotbar`. One instance for the
+     * lifetime of this `PlayerSystem`; `setHotbar` mutates its `slots`
+     * array in place, never replaces it. */
+    this._hotbar = createHotbar();
+
+    /** PLYR-3 — the cast-order state machine; see `./cast.js`'s own header.
+     * One instance, reused across every order (same discipline as
+     * `_pathFollower` above). */
+    this._castController = new CastController();
+
+    /** True while the physical RMB or a hotbar digit key (1-4) is
+     * currently held — latched every `update()` frame from `ctx.input`,
+     * never read from `fixedUpdate` directly (the file's own "fixedUpdate
+     * never reads ctx.input" rule; `_followCast` reads this field instead,
+     * the same one-frame-later discipline `intent.sequence` already uses).
+     * Governs whether a repeat-mode cast order (`point`/`actor`/
+     * `direction`) keeps retrying after each attempt — see cast.js's own
+     * header, "Repeats". */
+    this._castHeld = false;
+
+    /** The live `hoverTarget` snapshotted at the moment a new cast order is
+     * latched (press edge) — `Intent`'s own contract literal
+     * (`02-api-contracts.md:1199`) has no field for a cast's target actor
+     * id, so this is carried alongside `intent` rather than inside it (the
+     * same one-frame-later latch, just not on the shared object). */
+    this._latchedCastTargetId = 0;
 
     /** The camera's own focus point — trails the actor's interpolated
      * position outside the dead zone; see `_followCamera`. */
@@ -482,6 +603,23 @@ export class PlayerSystem {
      * above). See the file header's "PLYR-10 addendum" for which fields
      * this actually tracks the live actor for today. */
     this._hudScratch = createHudState();
+
+    /** PLYR-4 — experience, level, stat/skill point budget, and the
+     * one-step-deferred level-up refill. See `./progress.js`'s own header.
+     * One instance for the lifetime of this `PlayerSystem`, same discipline
+     * as `_pathFollower`/`_castController` above. */
+    this._progress = new ProgressTracker();
+
+    /** PLYR-4 — the `xp:gain` listener (`combat`, `src/combat/xp.js`,
+     * already emits this — `11-flows.md` §8's own sequence sketch).
+     * Registered in `init()`, removed in `dispose()`; kept as a bound
+     * instance field (not an inline arrow at `on()`-time) so `off()` can
+     * find the exact same function reference later — `EventBus#off`
+     * matches by identity. */
+    this._onXpGain = (payload) => {
+      if (!this._actor || payload.actor !== this._actor) return;
+      this.grantXp(payload.amount, payload.source ? payload.source.id : 0);
+    };
   }
 
   async init(ctx) {
@@ -490,13 +628,16 @@ export class PlayerSystem {
     this._nav = ctx.get('nav');
     this._rig = ctx.get('render').cameraRig;
 
-    // See the file header, "No player actor exists yet either".
+    // See the file header, "No player actor exists yet either". `level:
+    // PLACEHOLDER_LEVEL` explicit — see that constant's own comment for why
+    // omitting it is the exact bug PLYR-4 fixed.
     this._actor =
       this._actors.player ||
       this._actors.spawn({
         kind: 'player',
         team: PLACEHOLDER_TEAM,
         archetypeId: PLACEHOLDER_ARCHETYPE_ID,
+        level: PLACEHOLDER_LEVEL,
         x: 0,
         z: 0,
         facing: 0,
@@ -505,6 +646,16 @@ export class PlayerSystem {
     if (this._actor) {
       this._camFocus.x = this._actor.x;
       this._camFocus.z = this._actor.z;
+
+      // PLYR-4 — single-valued level, from the moment `player` first has an
+      // actor to read: `ProgressTracker` adopts whatever `actor.level`
+      // ALREADY is (the freshly-spawned placeholder above, or a real
+      // `actors.player` this file did not spawn itself — a future save/
+      // character-load) rather than assuming 1. `hudState().level` and
+      // `actor.level` must never disagree, at boot or after — see
+      // `ProgressTracker#seedFromActor`'s own doc comment and this ticket's
+      // report.
+      this._progress.seedFromActor(this._actor);
     }
 
     // See the file header, "The dev-only capsule/ground view" — dynamic,
@@ -515,6 +666,14 @@ export class PlayerSystem {
       this._debugView = new DebugView();
       this._debugView.init(ctx);
     }
+
+    // PLYR-4 — `11-flows.md` §8: "combat R14(j) -> xp:gain -> player
+    // listener (fixedUpdate, synchronous) -> experience accumulates".
+    // `combat` (src/combat/xp.js, already landed) emits this whenever a
+    // kill is credited; harmless to subscribe before `combat` exists at all
+    // (a minimal test ctx with no `combat` registered simply never emits
+    // it — `EventBus#emit` on an unknown/empty bucket is a no-op).
+    ctx.events.on('xp:gain', this._onXpGain);
   }
 
   // ─── 02-api-contracts.md §13 — the slice this ticket implements ────────
@@ -533,10 +692,58 @@ export class PlayerSystem {
     return this._intent;
   }
 
-  /** `hoverTarget` -> `int actorId`, 0 when none. Always 0 in this ticket —
-   * see the constructor comment on `_hoverTarget`. */
+  /** `hoverTarget` -> `int actorId`, 0 when none. PLYR-3: real now —
+   * `_updateHoverTarget` (called from `update()`, never `fixedUpdate` —
+   * this row's own contract is `Fixed: N`) recomputes it every frame via
+   * `physics.overlapCircle` at the ground cursor, `11-flows.md` §3.3 step
+   * 5. */
   get hoverTarget() {
     return this._hoverTarget;
+  }
+
+  /** `hotbar` -> `Hotbar` (`01-data-model.md` §6.4). `Fixed: Y` — returns
+   * the live object, same convention as `intent`. PLYR-3. */
+  get hotbar() {
+    return this._hotbar;
+  }
+
+  /** `setHotbar(index, skillId) => void` — binds (or clears, `skillId ===
+   * null`) hotbar slot `index`. `Fixed: N`. Silently no-ops on an
+   * out-of-range index or a non-string/non-null `skillId` — the same
+   * "drop rather than throw" convention `moveOrder`'s own dropped-order
+   * path already uses. Does not validate that `skillId` is a real,
+   * allocated skill: `skills` is reached only at call time via
+   * `ctx.peek` (never cached — see the file header's O-61 note), and a
+   * caller binding a not-yet-allocated skill to a slot is not itself
+   * wrong (the player may allocate the point later); `canCast`/`cast`
+   * are what actually gate usability, every time the slot is pressed. */
+  setHotbar(index, skillId) {
+    if (!Number.isInteger(index) || index < 0 || index >= HOTBAR_SLOT_COUNT) return;
+    if (skillId !== null && typeof skillId !== 'string') return;
+    this._hotbar.slots[index] = skillId;
+  }
+
+  /** `castOrder(hotbarIndex, x, z, targetId) => void` — `02-api-contracts.md`
+   * §13's row (`Fixed: Y`). Starts (or replaces) the cast-order state
+   * machine (`./cast.js#CastController`) for the skill bound to hotbar
+   * slot `hotbarIndex`. Silently no-ops on an out-of-range index, an empty
+   * slot, an unknown `skills` id, or when `skills` is not reachable
+   * (`ctx.peek` — never a hard dep, see the O-61 note on `static deps`
+   * below) — the same drop-don't-throw convention `moveOrder` already
+   * uses. Called both from `fixedUpdate`'s ladder dispatch (priority 5,
+   * RMB/1-4 — see `_latchIntent`) AND directly by `ui/hotbar.js#pressSlot`
+   * (a mouse click on the hotbar icon) — see cast.js's own header for why
+   * the two call sites end up with different "held" behaviour even though
+   * they share this one method. */
+  castOrder(hotbarIndex, x, z, targetId) {
+    if (!Number.isInteger(hotbarIndex) || hotbarIndex < 0 || hotbarIndex >= HOTBAR_SLOT_COUNT) return;
+    const skillId = this._hotbar.slots[hotbarIndex];
+    if (!skillId) return;
+    const skills = this._ctx && this._ctx.peek ? this._ctx.peek('skills') : null;
+    if (!skills) return;
+    const def = skills.definition(skillId);
+    if (!def) return;
+    this._castController.beginOrder(hotbarIndex, skillId, def, x, z, targetId | 0);
   }
 
   /** `setControlEnabled(on) => void`. §3.2 ladder priority 0: a disabled
@@ -544,6 +751,38 @@ export class PlayerSystem {
    * 11-flows.md §9). */
   setControlEnabled(on) {
     this._controlEnabled = !!on;
+  }
+
+  /** `02-api-contracts.md` §13: `grantXp(amount, sourceId) => void`. `Fixed:
+   * Y` — safe to call from any `fixedUpdate` (this is exactly how the
+   * `xp:gain` listener reaches it — see the constructor's `_onXpGain`).
+   * `11-flows.md` §8 step 1's own formula already applies every factor
+   * `combat` owns; the one factor left outstanding for `player` is
+   * `(1 + experienceGain/100)` — `src/combat/xp.js`'s own header states
+   * this explicitly: `xpForMonster`'s contract signature has no
+   * `experienceGain` parameter, and the multiplier is applied here,
+   * against the live `StatBlock`, not duplicated as a second copy of the
+   * formula. Silently no-ops without a live actor (mirrors every other
+   * drop-don't-throw method in this file). `sourceId` is accepted per the
+   * documented signature (the same "not consumed yet" convention
+   * `vessels.js#addLife`'s own `sourceId` parameter already established)
+   * — nothing in this ticket's scope reads it back.
+   * @param {number} amount
+   * @param {number} [sourceId]
+   */
+  // eslint-disable-next-line no-unused-vars
+  grantXp(amount, sourceId) {
+    if (!this._actor || !Number.isFinite(amount) || amount <= 0) return;
+    const s = this._actors.stats(this._actor);
+    const scaled = amount * (1 + s.experienceGain / 100);
+    this._progress.grantXp(scaled);
+  }
+
+  /** `02-api-contracts.md` §13: `xpToNextLevel() => int` — remaining XP to
+   * the next threshold, `0` at the level cap. `Fixed: Y`. Pure forward into
+   * `ProgressTracker` — see `./progress.js`. */
+  xpToNextLevel() {
+    return this._progress.xpToNextLevel();
   }
 
   /** `moveOrder(x,z) => void` — an explicit click-to-move destination.
@@ -585,13 +824,45 @@ export class PlayerSystem {
     this._cancelOrder();
   }
 
+  /** PLYR-3 — releases only the move order, leaving cast/interrupt state
+   * untouched. `./cast.js#CastController`'s own collaboration point: it
+   * calls this (not `stop()`) to stop WALKING once a chase order has
+   * arrived in range or is being replaced, without cancelling the cast
+   * order itself or triggering `skills.interrupt()` (which `stop()` does,
+   * and which would wrongly interrupt the very cast a chase just arrived
+   * to perform — `_stopChasing` in cast.js runs mid-`_attempt()`, often the
+   * same tick the actor gets into range and is about to cast). Not part of
+   * `02-api-contracts.md` — an intra-subsystem collaboration surface, the
+   * same tier `./move.js#PathFollower`'s own `beginOrder`/`step`/`cancel`
+   * already occupy (real methods, just not the contracted public API). */
+  releaseMoveOrder() {
+    this._pathFollower.cancel(this._nav);
+    this._intent.hasMoveOrder = false;
+  }
+
   /** @private */
   _cancelOrder() {
     // PLYR-2 addendum: releases/cancels any PathHandle/requestId the order
     // was holding — see move.js's header, "PathHandle lifetime".
-    this._pathFollower.cancel(this._nav);
-    this._intent.hasMoveOrder = false;
+    this.releaseMoveOrder();
     this._intent.stopRequested = false;
+
+    // PLYR-3 — §3.2 ladder priority 3's own row: "player.stop();
+    // skills.interrupt(actor); release the path; actors.setState(actor,
+    // 'idle')". Cancels any in-progress cast order (including a chase it
+    // started — already released by `releaseMoveOrder()` above;
+    // `CastController.cancel` only resets its own bookkeeping, see its own
+    // doc comment) and interrupts the skill itself (cancels a cast/channel
+    // — `02-api-contracts.md` §10). `skills` reached via `ctx.peek` — never
+    // cached (O-61 note on `static deps`).
+    this._intent.castSkillIndex = -1;
+    this._castHeld = false;
+    if (this._actor) {
+      this._castController.cancel(this);
+      const skills = this._ctx && this._ctx.peek ? this._ctx.peek('skills') : null;
+      if (skills && typeof skills.interrupt === 'function') skills.interrupt(this._actor);
+    }
+
     if (this._actor && typeof this._actors.setState === 'function') {
       this._actors.setState(this._actor, 'idle');
     }
@@ -618,12 +889,13 @@ export class PlayerSystem {
    * writes the fixed-length arrays' elements in place, never allocates.
    * Falls back to the reused `_hudScratch` when called with no argument.
    *
-   * See the file header's "PLYR-10 addendum" for exactly which fields track
-   * the live actor/`StatBlock` today (O-57 closed by ACTR-15) and which are
-   * still blocked (`secondaryDecay`) or simply have no owning feature wired
-   * into `player` yet (left at the `HudState` literal's own contract
-   * defaults, per O-27 — a default, not an assertion that nothing else will
-   * ever exist).
+   * See the file header's "PLYR-10 addendum" / "PLYR-4 addendum" for exactly
+   * which fields track the live actor/`StatBlock` today (O-57 closed by
+   * ACTR-15; `inCombat`/`secondaryDecay`/`level`/XP/point fields closed by
+   * O-83/PLYR-4) and which simply have no owning feature wired into
+   * `player` yet (left at the `HudState` literal's own contract defaults,
+   * per O-27 — a default, not an assertion that nothing else will ever
+   * exist).
    * @param {object} [out]
    * @returns {object}
    */
@@ -672,44 +944,84 @@ export class PlayerSystem {
       dst.secondaryKind = 'rage';
     }
 
-    // Still blocked — not on O-57 (closed), but on `inCombat` (below, left
-    // at its own default per this ticket's brief) and on the decay-rate
-    // constants living privately in src/actors/vessels.js. See the file
-    // header's "PLYR-10 addendum".
-    dst.secondaryDecay = 0;
+    // PLYR-4/O-83 — real now. `computeSecondaryDecay` mirrors
+    // `src/actors/vessels.js#decayOutOfCombat`'s own gating (0 while
+    // `inCombat`, 0 once the resource is already at 0) so this always
+    // matches what the NEXT fixed step's decay will actually do — see
+    // `./progress.js`'s own header. `dst.inCombat` is computed a few lines
+    // below (it needs `step`, read once here since both derive from the
+    // same live actor fields).
+    {
+      const step = this._ctx && this._ctx.time ? this._ctx.time.step : 0;
+      dst.inCombat = computeInCombat(actor, step);
+      dst.secondaryDecay = computeSecondaryDecay(dst.secondaryKind, dst.secondary, dst.inCombat);
+    }
+
+    // PLYR-4 — real now. `experience`/`level`/`statPoints`/`skillPoints`
+    // are `ProgressTracker`'s own fields (`./progress.js`); `xpFloor`/
+    // `xpCeiling` are `XP_TABLE[level]`/`XP_TABLE[level+1]` (D-38,
+    // `./data/progression.js`), capped at the level-cap entry once
+    // `level === LEVEL_CAP` (13-progression-lore.md §1.7: no level 31 —
+    // `ui` shows `hud.maxLevel` in place of the fraction at the cap, not
+    // this file's concern). `xp` is progress WITHIN the current level's
+    // band (`xpTotal - xpFloor`), matching the literal's own worked
+    // default at level 1 (`xp:0, xpFloor:0, xpCeiling:50, xpTotal:0`).
+    {
+      const p = this._progress;
+      const level = p.level;
+      const floor = XP_TABLE[level];
+      const ceiling = level < LEVEL_CAP ? XP_TABLE[level + 1] : XP_TABLE[LEVEL_CAP];
+      dst.level = level;
+      dst.xpTotal = p.experience;
+      dst.xpFloor = floor;
+      dst.xpCeiling = ceiling;
+      dst.xp = dst.xpTotal - floor;
+      dst.statPoints = p.statPoints;
+      dst.skillPoints = p.skillPoints;
+    }
 
     // Owned by systems landing M4/M6 (this ticket's brief, point 5) —
     // contract literal defaults, verbatim.
-    dst.xp = 0;
-    dst.xpFloor = 0;
-    dst.xpCeiling = 50;
-    dst.xpTotal = 0;
-    dst.statPoints = 0;
-    dst.skillPoints = 0;
     dst.gold = 0;
     dst.questStep = 0;
-    dst.cooldowns[0] = 0;
-    dst.cooldowns[1] = 0;
-    dst.cooldowns[2] = 0;
-    dst.cooldowns[3] = 0;
-    dst.hotbar[0] = null;
-    dst.hotbar[1] = null;
-    dst.hotbar[2] = null;
-    dst.hotbar[3] = null;
+
+    // PLYR-3 — real now. `src/ui/hotbar.js:14-21`'s own gap note: this used
+    // to zero `hotbar[0..3]`/`cooldowns[0..3]` unconditionally because
+    // `player.hotbar`/`castOrder`/`setHotbar` did not exist. `dst.hotbar[i]`
+    // is the slot's `skillId | null` straight off the live `Hotbar` record
+    // (mutated in place, never reallocated — Alloc: no); `dst.cooldowns[i]`
+    // is `skills.cooldownRemaining(actor, skillId)` (seconds) when a real
+    // skill sits there and `skills` is reachable, else `0` — an EMPTY slot
+    // on a fresh actor still reads `null`/`0`, so this stays compatible
+    // with `tests/player/hudstate.test.js`'s own already-accepted
+    // "fields owned by systems landing M4/M6 hold the HudState literal's
+    // own defaults" assertion (nothing in that test ever calls
+    // `setHotbar`). `ctx.peek` — never cached (O-61 note on `static deps`).
+    {
+      const skills = actor && this._ctx && this._ctx.peek ? this._ctx.peek('skills') : null;
+      const slots = this._hotbar.slots;
+      const cds = dst.cooldowns;
+      const hb = dst.hotbar;
+      for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
+        const skillId = slots[i];
+        hb[i] = skillId;
+        cds[i] = skillId && skills ? skills.cooldownRemaining(actor, skillId) : 0;
+      }
+    }
+
     dst.belt[0] = 0;
     dst.belt[1] = 0;
     dst.belt[2] = 0;
     dst.belt[3] = 0;
 
     // No owning feature wired into `player` yet — contract literal
-    // defaults. See the file header's "PLYR-10 addendum".
-    dst.level = 1;
+    // defaults. See the file header's "PLYR-10 addendum". `level`/
+    // `inCombat` are set above now (PLYR-4/O-83).
     dst.targetId = 0;
     dst.difficulty = 'instruction';
     dst.zoneId = 'last_bastion';
     dst.name = '';
     dst.classId = 'ravager';
-    dst.inCombat = false;
 
     return dst;
   }
@@ -726,6 +1038,7 @@ export class PlayerSystem {
     this._ctx = ctx;
 
     this._updateGroundCursor(ctx);
+    this._updateHoverTarget(ctx);
     this._latchIntent(ctx);
     this._followCamera(ctx);
 
@@ -734,16 +1047,31 @@ export class PlayerSystem {
 
   /**
    * The intent-consuming half of §3 — sub-step P1 of `player.fixedUpdate`.
-   * Only the two branches this ticket's boundary covers: priority 3 (stop)
-   * and priority 8 (move order; every branch in between needs `skills`/
-   * `world`/`physics.overlapCircle`, none of which exist). Never reads
-   * `ctx.input` (see the file header) — only `this._intent`, already
-   * latched by a *previous* frame's `update()`.
+   * Priority 3 (stop), priority 5 (PLYR-3: cast, `intent.castSkillIndex >=
+   * 0`) and priority 8 (move order) — priorities 4/6/7 (belt/interact/
+   * attack) need `items`/`world`/`combat` wiring this ticket does not own
+   * (see this ticket's report). Never reads `ctx.input` (see the file
+   * header) — only `this._intent`/`this._latchedCastTargetId`/
+   * `this._castHeld`, all already latched by a *previous* frame's
+   * `update()`.
    * @param {number} h - the fixed step, `FIXED_DT`. Never `ctx.time.dt`.
    * @param {object} ctx
    */
   fixedUpdate(h, ctx) {
     if (!this._actor || !this._actor.active) return;
+
+    // PLYR-4 — resources/decay/level-up bookkeeping. Runs unconditionally,
+    // even while `_controlEnabled` is false (a zone-transition fade is an
+    // INPUT concern, `11-flows.md` §9 — XP/level bookkeeping keeps running
+    // under it). `applyPendingRefill` first: it consumes a flag set by a
+    // level-up on a PREVIOUS step, one full step before `checkLevelUp`
+    // below can set a new one — see `./progress.js`'s own header for why
+    // that ordering, not the reverse, is what gives the documented
+    // one-step delay. Both are `Fixed: Y`-safe (`markDirty`/`stats` are
+    // both `Fixed: Y` in `02-api-contracts.md` §7).
+    this._progress.applyPendingRefill(this._actor, this._actors);
+    this._progress.checkLevelUp(this._actor, this._actors, ctx.events);
+
     if (!this._controlEnabled) return; // ladder priority 0
 
     const intent = this._intent;
@@ -752,12 +1080,15 @@ export class PlayerSystem {
       if (intent.stopRequested) {
         intent.stopRequested = false; // one-shot, consumed
         this._cancelOrder(); // not `this.stop()` — see that method's own comment
+      } else if (intent.castSkillIndex >= 0) {
+        this.castOrder(intent.castSkillIndex, intent.castX, intent.castZ, this._latchedCastTargetId);
       } else if (intent.hasMoveOrder) {
         this.moveOrder(intent.moveX, intent.moveZ);
       }
     }
 
     this._followOrder(h, ctx);
+    this._followCast(ctx);
   }
 
   dispose() {
@@ -769,6 +1100,14 @@ export class PlayerSystem {
     // before this instance goes away — see move.js's header, "PathHandle
     // lifetime".
     this._pathFollower.cancel(this._nav);
+    // PLYR-3: reset the cast controller too — `player: null` since
+    // `releaseMoveOrder` above already handled the path, and nothing
+    // downstream needs `skills.interrupt()` called during teardown.
+    this._castController.cancel(null);
+    // PLYR-4 — unsubscribe `xp:gain` (see `init()`); `EventBus#off` matches
+    // by function identity, so this only ever removes this instance's own
+    // handler.
+    if (this._ctx && this._ctx.events) this._ctx.events.off('xp:gain', this._onXpGain);
     this._ctx = null;
     this._actors = null;
     this._nav = null;
@@ -815,6 +1154,64 @@ export class PlayerSystem {
   }
 
   /**
+   * PLYR-3 — §3.3 step 5, verbatim: `physics.overlapCircle(gx, gz, 0.65,
+   * MASK.ACTORS, scratch)`, keep the nearest whose `ACTOR_FLAG.untargetable`
+   * is clear, preferring hostile over neutral, breaking ties by lower
+   * `actor.id`. Writes `this._hoverTarget`; a no-op (holds the last value)
+   * without a live actor/`physics` (a minimal test `ctx`).
+   * @private
+   */
+  _updateHoverTarget(ctx) {
+    const physics = ctx.peek ? ctx.peek('physics') : null;
+    if (!physics || !this._actor) {
+      this._hoverTarget = 0;
+      return;
+    }
+
+    const cursor = this._cursor;
+    const scratch = this._hoverScratch;
+    const count = physics.overlapCircle(cursor.x, cursor.z, HOVER_PICK_RADIUS_M, physics.MASK.ACTORS, scratch);
+
+    let bestId = 0;
+    let bestHostile = false;
+    let bestDistSq = Infinity;
+    for (let i = 0; i < count; i++) {
+      const id = scratch[i];
+      if (id === this._actor.id) continue;
+      const target = this._actors.byId(id);
+      if (!target || target.dead) continue;
+      if ((target.flags & ACTOR_FLAG_UNTARGETABLE) !== 0) continue;
+
+      const dx = target.x - cursor.x;
+      const dz = target.z - cursor.z;
+      const distSq = dx * dx + dz * dz;
+      const hostile = isHostile(this._actor, target);
+
+      if (bestId === 0) {
+        bestId = id;
+        bestHostile = hostile;
+        bestDistSq = distSq;
+        continue;
+      }
+      if (hostile && !bestHostile) {
+        // Preferring hostile over neutral outranks distance.
+        bestId = id;
+        bestHostile = hostile;
+        bestDistSq = distSq;
+      } else if (hostile === bestHostile) {
+        if (distSq < bestDistSq || (distSq === bestDistSq && id < bestId)) {
+          bestId = id;
+          bestHostile = hostile;
+          bestDistSq = distSq;
+        }
+      }
+      // hostile === false && bestHostile === true: keep the current best.
+    }
+
+    this._hoverTarget = bestId;
+  }
+
+  /**
    * §3.1/§3.3/§3.5: writes `this._intent` from this frame's input snapshot.
    * The whole latch lives here — `fixedUpdate` never repeats any of it.
    * @private
@@ -822,6 +1219,23 @@ export class PlayerSystem {
   _latchIntent(ctx) {
     const input = ctx.input;
     if (!input) return;
+
+    // O-78 — the player half of `ui.pointerOverUi` (`11-flows.md` §3.2
+    // priority 1 / §3.7's "click on the plinth" row): drop EVERY new order
+    // this frame while the pointer is over solid UI, including the
+    // one-extra-frame close-click swallow guard — both already folded into
+    // `ui.pointerOverUi` itself by UI-10 (`src/ui/index.js`'s own O-78
+    // header). `ui` is not one of this subsystem's `deps` (see the O-61
+    // note on `static deps`) — reached via `ctx.peek`, the file's existing
+    // degrade-don't-throw convention, so a minimal test `ctx` with no `ui`
+    // registered behaves exactly as before (guard is a no-op). This does
+    // NOT touch any order already in progress — `_followOrder`/
+    // `_followCast` keep running regardless, only NEW input is dropped.
+    const ui = ctx.peek ? ctx.peek('ui') : undefined;
+    if (ui && ui.pointerOverUi) {
+      this._castHeld = false;
+      return;
+    }
 
     // Read, not yet acted on in this ticket's classification ladder — see
     // the `SHIFT_*_CODE` comment above.
@@ -832,7 +1246,42 @@ export class PlayerSystem {
     if (input.keyPressed(STOP_KEY_CODE)) {
       intent.stopRequested = true;
       intent.sequence++;
+      this._castHeld = false;
       return; // §3.2: stop outranks a move order latched the same frame.
+    }
+
+    // PLYR-3 — §3.2 ladder priority 5: RMB / 1-4 -> castOrder
+    // (`05-skills.md` §1.4: RMB casts `hotbar.rightMouse`'s slot, keys 1-4
+    // cast their own index). `this._castHeld` tracks the RAW held state
+    // every frame (needed by `CastController`'s own "repeats while held"
+    // mechanism — see cast.js's header); the press edge is what starts a
+    // NEW order and bumps `intent.sequence`, the same press-only-advances
+    // rule `hasMoveOrder` already follows.
+    const rmbHeld = input.buttonHeld(CAST_BUTTON);
+    let digitHeld = false;
+    for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
+      if (input.keyHeld(DIGIT_KEY_CODES[i])) { digitHeld = true; break; }
+    }
+    this._castHeld = rmbHeld || digitHeld;
+
+    let pressedIndex = -1;
+    if (input.buttonPressed(CAST_BUTTON)) pressedIndex = this._hotbar.rightMouse; // -1 = 'attack', out of this ticket's scope
+    if (pressedIndex < 0) {
+      for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
+        if (input.keyPressed(DIGIT_KEY_CODES[i])) { pressedIndex = i; break; }
+      }
+    }
+    if (pressedIndex >= 0) {
+      intent.castSkillIndex = pressedIndex;
+      intent.castX = this._cursor.x;
+      intent.castZ = this._cursor.z;
+      // `Intent`'s own contract literal has no target-actor field
+      // (`02-api-contracts.md:1199`) — carried alongside it instead, the
+      // same one-frame-later latch, just not on the shared object. See the
+      // constructor's own comment on `_latchedCastTargetId`.
+      this._latchedCastTargetId = this._hoverTarget;
+      intent.sequence++;
+      return; // exclusive with move this frame — matches STOP's own precedent above.
     }
 
     const pressed = input.buttonPressed(MOVE_BUTTON);
@@ -840,13 +1289,40 @@ export class PlayerSystem {
     if (!pressed && !held) return; // nothing new — a click's order sticks
     // until fixedUpdate's own arrival/stop logic clears it.
 
-    // §3.3's classification ladder: priorities 1-3 need a ground-item pick,
-    // `physics.overlapCircle` and `world.interactableAt` — none of which
-    // exist (this ticket's boundary). Every click reaches priority 4.
+    // §3.3's classification ladder: priorities 1-3 need a ground-item pick
+    // and `world.interactableAt` (priority 2's own hostile-actor pick now
+    // has a real value to read, `this._hoverTarget` — but wiring the
+    // `attackTargetId` branch itself is PLYR-4/5's basic-attack territory,
+    // not this ticket's, see this ticket's report). Every click still
+    // reaches priority 4 here.
     intent.hasMoveOrder = true;
     intent.moveX = this._cursor.x;
     intent.moveZ = this._cursor.z;
     if (pressed) intent.sequence++; // §3.5: only the press edge advances it.
+  }
+
+  /**
+   * PLYR-3 — the cast-order-consuming half, mirroring `_followOrder`
+   * exactly: runs every fixed step regardless of the latch (a held repeat
+   * needs to keep re-attempting), and clears `intent.castSkillIndex` back
+   * to `-1` the instant the order stops being active (arrived+cast,
+   * refused terminally, or the button was released) — see cast.js's own
+   * header for the full state machine.
+   * @private
+   */
+  _followCast(ctx) {
+    if (!this._castController.active) return;
+    const deps = {
+      actors: this._actors,
+      skills: ctx.peek ? ctx.peek('skills') : null,
+      items: ctx.peek ? ctx.peek('items') : null,
+      audio: ctx.peek ? ctx.peek('audio') : null,
+      held: this._castHeld,
+      shiftHeld: this._shiftHeld,
+      step: ctx.time ? ctx.time.step : 0,
+    };
+    this._castController.step(this, deps);
+    if (!this._castController.active) this._intent.castSkillIndex = -1;
   }
 
   /**

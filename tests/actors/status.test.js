@@ -248,6 +248,62 @@ test('refresh: frozen/stunned magnitude is unused (0) regardless of what a calle
   assert.equal(inst.statMods, null);
 });
 
+// ---------------------------------------------------------------------------
+// CMBT-9/D-55, defect A — cursed's statMods: defensePercent takes the full
+// magnitude, the six resists take magnitude x 0.375 (03-combat-math.md
+// §7.10, verbatim: "cursed at magnitude 40 is therefore -40% defence and
+// -15 resistance points"). The previous implementation gave every listed
+// key the full magnitude (a blanket `mods[key] = -magnitude` generalisation
+// that is correct for chilled/slowed/blinded but wrong for cursed), a 2.67x
+// over-application on the six resists (verified below against 40 x 0.375 = 15).
+// ---------------------------------------------------------------------------
+
+test('cursed(40): defensePercent takes the full magnitude, each of the six resists takes magnitude x 0.375 (03 §7.10)', () => {
+  const actor = makeActor();
+  const inst = applyStatus(actor, { status: 'cursed', step: 0, sourceId: 1, magnitude: 40, duration: 6.0 });
+  assert.ok(inst);
+  assert.deepEqual(inst.statMods, {
+    defensePercent: -40,
+    fireResist: -15,
+    coldResist: -15,
+    lightResist: -15,
+    poisonResist: -15,
+    magicResist: -15,
+    physicalResist: -15,
+  });
+});
+
+test('cursed: a refresh that raises magnitude (max-wins) recomputes the split coefficients, not a blanket -magnitude', () => {
+  const actor = makeActor();
+  const first = applyStatus(actor, { status: 'cursed', step: 0, sourceId: 1, magnitude: 20, duration: 4.0 });
+  assert.equal(first.statMods.defensePercent, -20);
+  assert.equal(first.statMods.fireResist, -7.5);
+
+  const second = applyStatus(actor, { status: 'cursed', step: 10, sourceId: 2, magnitude: 40, duration: 4.0 });
+  assert.equal(second, first, 'refresh mutates in place');
+  assert.equal(second.statMods.defensePercent, -40, 'defensePercent keeps the full new magnitude');
+  assert.equal(second.statMods.fireResist, -15, 'resists take the new magnitude x 0.375, not the old blanket -magnitude (-40)');
+  assert.equal(second.statMods.coldResist, -15);
+  assert.equal(second.statMods.lightResist, -15);
+  assert.equal(second.statMods.poisonResist, -15);
+  assert.equal(second.statMods.magicResist, -15);
+  assert.equal(second.statMods.physicalResist, -15);
+});
+
+test('chilled/slowed/blinded statMods stay full-magnitude on every listed key — only cursed splits (regression guard against over-generalising the fix)', () => {
+  const actor = makeActor();
+  const chilled = applyStatus(actor, { status: 'chilled', step: 0, sourceId: 1, magnitude: 30, duration: 2.0 });
+  assert.deepEqual(chilled.statMods, { movementSpeed: -30, increasedAttackSpeed: -30, fasterCastRate: -30 });
+
+  const actor2 = makeActor();
+  const slowed = applyStatus(actor2, { status: 'slowed', step: 0, sourceId: 1, magnitude: 50, duration: 2.0 });
+  assert.deepEqual(slowed.statMods, { movementSpeed: -50 });
+
+  const actor3 = makeActor();
+  const blinded = applyStatus(actor3, { status: 'blinded', step: 0, sourceId: 1, magnitude: 60, duration: 3.0 });
+  assert.deepEqual(blinded.statMods, { attackRatingPercent: -60 });
+});
+
 test('frozen: reapplication is blocked for the 3.0 s immunity window after it expires', () => {
   const actor = makeActor();
   applyStatus(actor, { status: 'frozen', step: 0, sourceId: 1, magnitude: 0, duration: 1.2 });

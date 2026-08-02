@@ -75,11 +75,13 @@ import {
   rasterizeNav,
   passN1Clear,
   passN2GroundStamp,
+  passN6Cost,
   passN7Regions,
   walkable as gridWalkable,
   flagsAt as gridFlagsAt,
   regionAt as gridRegionAt,
   connected as gridConnected,
+  markHazard as gridMarkHazard,
 } from './grid.js';
 import { AStarScheduler } from './astar.js';
 import { smoothPath } from './smooth.js';
@@ -231,9 +233,34 @@ export class NavSystem {
     this._scratch = createRasterScratch(this._gridWidth, this._gridHeight);
     passN1Clear(this._grid);
     passN2GroundStamp(this._grid, null); // absent-input fallback: whole grid walkable
+    // NAV-6 — N6 now runs even on the placeholder: `markHazard` (below)
+    // needs a real `cost` baseline (`this._hazardBaseCost`, next) to
+    // recompute from, and N1 alone leaves `grid.cost` at 255 everywhere
+    // (impassable) despite N2 having just marked every cell walkable — a
+    // pre-existing mismatch this ticket is the first caller to actually
+    // depend on being correct. `this._scratch.nearWall` is all-zero here
+    // (never touched without a real `passN4FootprintStamp` call), so this
+    // computes the honest, only-possible answer for an untouched
+    // placeholder: cost 1 everywhere.
+    passN6Cost(this._grid, this._scratch);
     passN7Regions(this._grid, this._scratch); // single region, id 0
     this._grid.version = 0;
     this._version = 0;
+
+    // NAV-6 (D-58) — `markHazard`'s own bookkeeping. `refcount[i]` is the
+    // live-hazard-source count per cell (what makes overlapping hazards not
+    // corrupt each other — see `./grid.js`'s `markHazard` header for the
+    // full reasoning); `baseCost[i]` is `grid.cost[i]` as N6 left it, with
+    // the hazard term always 0, captured once so the cost bump/undo is
+    // always a recompute from a cached value, never an incremental
+    // `+=`/`-=` that N6's `clamp(..., 254)` would make unsound. Both are
+    // preallocated here and in every `rebuild()` (rule 5 — `Alloc: no` on
+    // `markHazard` itself), sized to the grid's current cell count, and
+    // both are reset whenever the grid is rebuilt — see `rebuild()`'s own
+    // comment for why that reset is the correct call, not a leak.
+    this._hazardRefcount = new Uint16Array(this._gridWidth * this._gridHeight);
+    this._hazardBaseCost = new Uint8Array(this._gridWidth * this._gridHeight);
+    this._hazardBaseCost.set(this._grid.cost);
 
     // `stats` — Alloc: no, mutated in place, same object every call (the
     // `src/physics/index.js` `get stats()` convention). Every field here
@@ -311,6 +338,27 @@ export class NavSystem {
    * `Alloc: yes`, but there is no reason to pay for it on every call when
    * the shape didn't move).
    *
+   * NAV-6 (D-58) — every `rebuild()` unconditionally RESETS
+   * `this._hazardRefcount` to all-zero and recaptures `this._hazardBaseCost`
+   * from the freshly-rasterised `grid.cost` (which N1 always clears to
+   * hazard-free first). This is the documented answer to the ticket's rule
+   * 12 ("must not resurrect stale hazards, must not silently drop live
+   * ones"): dropping is the correct call here, not a leak in disguise,
+   * because `rebuild()` only ever runs on a full zone transition
+   * (`02-api-contracts.md` §6: "called by `world` only") — `07-world-gen.md`
+   * §6.6's own table says the nav grid is otherwise immutable except for
+   * this bit, so a rebuild always means "new geometry, N1 clears `flags`
+   * to 0". Every live hazard source is a ground effect owned by `skills`,
+   * and `skills`' own `zone:teardown` listener already tears down every
+   * ground effect on the same zone transition that triggers this rebuild
+   * (`02-api-contracts.md` §10, "Listens: ... `zone:teardown` (clears
+   * projectiles and ground effects)") — so by the time a rebuilt grid is
+   * ever queried again, no source claiming a hazard on the OLD grid still
+   * exists to re-register on the new one. There is no "live" hazard to
+   * drop across this boundary; carrying `refcount`/`baseCost` across it
+   * instead would be the actual bug — stale counts from a torn-down zone's
+   * cell layout silently misapplied to a same-sized new zone's cells.
+   *
    * @param {object} [zone] a `ZoneInstance`. See `resolveGridGeometry` for
    *   what happens when this is omitted or lacks grid geometry — including
    *   the documented, real call site (`src/world/index.js`'s own
@@ -334,6 +382,10 @@ export class NavSystem {
       this._scratch = createRasterScratch(geo.width, geo.height);
       this._gridWidth = geo.width;
       this._gridHeight = geo.height;
+      // NAV-6 — resized, so `markHazard`'s buffers must be too (rule 5:
+      // preallocated, never grown/rebuilt per-call).
+      this._hazardRefcount = new Uint16Array(geo.width * geo.height);
+      this._hazardBaseCost = new Uint8Array(geo.width * geo.height);
     } else {
       // Same cell dimensions — reuse the typed arrays, just refresh the
       // scalar placement fields (a same-sized zone can still sit at a
@@ -352,6 +404,14 @@ export class NavSystem {
       entry: null, // no generator-supplied entry point exists yet (07 §6.2 N8's own optional-input path)
       spawnDenyMarkers: null, // no spawner/generator ticket has landed yet
     });
+
+    // NAV-6 — see this method's own header. `rasterizeNav` (N1-N10) never
+    // writes NAV_FLAG.hazard itself, so `grid.cost` here is always the
+    // correct, hazard-free baseline `markHazard` recomputes from; the
+    // refcount array is reset to all-zero for the same reason (no
+    // survivor to preserve across a zone transition).
+    this._hazardRefcount.fill(0);
+    this._hazardBaseCost.set(this._grid.cost);
 
     // N11 (07 §6.2 / §6.7): process-global monotonic bump, mirrored onto
     // both the grid and the zone, then the event.
@@ -398,6 +458,27 @@ export class NavSystem {
    * no — same convention `pathNode`/`flowAt` already use). */
   snap(x, z, maxRadius, out) {
     return snapPoint(this._grid, x, z, maxRadius, out || this._snapScratch);
+  }
+
+  /** `02-api-contracts.md` §6 / D-58 (NAV-6): `markHazard(x,z,radius,on) =>
+   * void` — the only writer of `NAV_FLAG.hazard`; `skills` is its only
+   * legitimate caller (§6 "Forbidden for callers", restated in §10's own
+   * "Forbidden for callers" for `skills`). Sets/clears the bit and the
+   * `RASTER.COST_HAZARD` cost bump on exactly the cells whose centre lies
+   * within `radius` of `(x,z)`, never touching `walkable` or `region` — see
+   * `./grid.js`'s own `markHazard` for the algorithm: refcounted overlap
+   * safety (criterion 4 — two hazards sharing a cell, one expiring, must
+   * leave the cell still marked) and a cached-baseline cost recompute
+   * (never an incremental `+=`/`-=`, which `passN6Cost`'s clamp would make
+   * unsound). This method itself owns nothing but forwarding — the two
+   * buffers that make it `Alloc: no` (`this._hazardRefcount`,
+   * `this._hazardBaseCost`) are preallocated in the constructor and reset
+   * every `rebuild()` (see that method's own comment for why a rebuild
+   * always resets them rather than carrying hazards across a zone change).
+   * @param {number} x @param {number} z @param {number} radius
+   * @param {boolean} on */
+  markHazard(x, z, radius, on) {
+    gridMarkHazard(this._grid, this._hazardRefcount, this._hazardBaseCost, x, z, radius, on);
   }
 
   /** `02-api-contracts.md` §6: `stats` -> `{ pending, solvedThisSecond,
