@@ -14,6 +14,10 @@
 // `spawnPack`, `despawnAll`, `alertPack`, `rollAffixes`, `affixStats`,
 // `bossPhase`/`bossPhaseProgress`/`bossActor`, `packTemplate`,
 // `priorityTargets`, `setDensityBudget`, `debugStage`, `prewarmMaterials`.
+// (Superseded in part: AI-7 added `spawnPack`/`despawnAll`/`packTemplate`/
+// `setDensityBudget`, and AI-8 added `rollAffixes`/`affixStats` — see the
+// per-ticket addenda below. `tools/balance.mjs`'s MB10 row quotes this list
+// verbatim, so it is corrected here rather than left to mislead.)
 // Left UNIMPLEMENTED, not stubbed with fake return values — O-27: this is
 // not an assertion that those features don't exist, only that this ticket
 // did not build them. `stats` (the one property partially implemented) has
@@ -110,7 +114,11 @@
 // here so a later ticket that DOES need the `ai` stream never accidentally
 // re-forks per `06` §14's "once in init(), never re-forked."
 
-import { BESTIARY, lifeMult } from './data/bestiary.js';
+// AI-8 — `lifeMult` is no longer imported: `spawnOne` reads a champion's life
+// off `actors.stats()`'s composed block (which applies `03` §10.1's rank term
+// too) instead of re-deriving `baseLife × lifeMult(mlvl)` here. `BESTIARY`
+// stays — `archetype`/`archetypes`/`baseXp` still read it.
+import { BESTIARY } from './data/bestiary.js';
 import { stepMeleeBrain, MELEE_ARCHETYPES } from './brains/melee.js';
 import {
   createPerceptionStore,
@@ -144,7 +152,60 @@ import {
   packTemplate as packTemplateImpl,
   SPAWN_SAFETY,
   PACK_TIER,
+  resolveRoster,
+  promotionRanks,
+  effectivePackCount,
+  isPackTemplateId,
 } from './spawn.js';
+import {
+  createAffixStore,
+  resetAffixStore,
+  setActorAffixes,
+  actorAffixes,
+  actorHasAffix,
+  affixLayer,
+  affixStats as affixStatsImpl,
+  rollAffixes as rollAffixesImpl,
+  rollUniqueName,
+  rankCarriesAffixes,
+  affixCountForRank,
+  rankTelegraph,
+  affixTelegraph,
+  immunityValue,
+  DEFAULT_TIER,
+} from './rank.js';
+
+// ---------------------------------------------------------------------------
+// AI-8 addendum — champions, uniques and the nine affixes (`06` §5.7, §5.8, §6)
+// ---------------------------------------------------------------------------
+// Assertion set is D-64's: **MB3, MB4, MB7, MB8, MB10**.
+//
+// Wiring only, per this ticket's own grant: one new import block (above), one
+// new `this._affixStore` plus two small scratches (constructor), two new
+// `02-api-contracts.md` §12 methods (`rollAffixes`, `affixStats` — thin
+// forwards into `./rank.js`, the same "index.js: wiring only" precedent
+// AI-3/AI-4/AI-5/AI-6/AI-7 already set) and three uncontracted accessors
+// (`affixesOf`, `hasAffix`, `telegraphOf`), a per-pack roll pass and a
+// unique-naming pass around the EXISTING `_onZoneReady`, and inside
+// `spawnOne` one affix-application block plus one corrected line. `brainOf`,
+// `aliveCount` and `fixedUpdate` are byte-for-byte unchanged, and this
+// ticket adds nothing to `fixedUpdate` at all — every draw happens at
+// `zone:ready` (`06` §14.1), never per step.
+//
+// The ONE behavioural correction, disclosed rather than slipped in:
+// `spawnOne` set `actor.life = round(baseLife × lifeMult(mlvl))` with no rank
+// term, so a promoted champion spawned with **88** life against a composed
+// `stats.maxLife` of **351** — `06` §5.7 promotion was inert on the only
+// number that makes a champion a champion, and MB3/MB4 are unmeasurable
+// through the real pipeline while it holds. It now reads
+// `actors.stats(actor).maxLife`, which is ACTR-24's own composition
+// (`bestiaryValue × mlvlMult × rankMult`, `03` §10.1) rather than a second
+// re-derivation of it. For `rank: 'normal'` — every actor every pre-existing
+// test spawns — the two expressions are identical by construction
+// (`rankMult.normal.life === 1.0`, and `derive()` folds a monster's
+// `maxLife` as `flatMaxLife × (1 + 0/100)`), which is why this is a
+// correction to the champion path and not a change to anything already
+// green. Measured before and after over the full suite — see the report.
 
 // ---------------------------------------------------------------------------
 // AI-7 addendum — pack templates and the spawn pass (`06` §5.1-5.6, §10.1-10.5)
@@ -336,6 +397,32 @@ export class AiSystem {
     this._entryField = null;
     this._spawnSafety = null;
 
+    /** AI-8 — `./rank.js`'s own per-actor affix record. `01-data-model.md`
+     * §2's Actor has no `affixes` field and `src/actors/pool.js#acquire`
+     * accepts `SpawnSpec.affixes` and never writes it anywhere (a real gap
+     * outside this ticket's grant — reported), so `ai` keeps its own in the
+     * same preallocated parallel-array shape as every store above. */
+    this._affixStore = createAffixStore(MAX_BRAINS);
+
+    /** AI-8 scratch, all reused — `ARCHITECTURE.md` rule 6. `_affixRoll` is
+     * the per-pack `rollAffixes` output, `_affixScratch` the read-back buffer
+     * for `affixesOf`, `_affixLayerScratch` the merged StatBlock partial
+     * handed to `actors.setSourceLayer`, `_uniqueName` `rollUniqueName`'s
+     * `out`, and `_packArchetypes` the promoted members' archetype list
+     * (`06` §6.3's eligibility scope for a mixed pack — see `./rank.js`'s
+     * own `fillGroupCandidates` comment). `_affixLayerScratch` is the one
+     * that is NOT safe to reuse blindly: `setSourceLayer` STORES the object
+     * it is handed on the actor, so each application needs its own — see
+     * `_applyAffixes`. */
+    this._affixRoll = [];
+    this._affixScratch = [];
+    this._uniqueName = { epithet: '', title: '', titleRu: '', name: '' };
+    this._packArchetypes = [];
+    /** Pending unique names by `PackDescriptor.id`, filled by the §14.1 roll
+     * pass and consumed by the naming pass immediately after the spawn pass
+     * — see `_onZoneReady`. */
+    this._pendingUniqueNames = new Map();
+
     /** `brainOf()`'s reused scratch — same "valid until the next call, never
      * stash one" discipline `motion.js`'s `MoveResult` / `pool.js`'s no-`out`
      * `ref()` scratch already document for this codebase. */
@@ -407,11 +494,133 @@ export class AiSystem {
         this._entryField = buildEntryDistanceField(nav, e.x, e.z);
       }
     }
+    // AI-8 — `06` §14.1's draws, taken BEFORE the spawn pass so that
+    // `spawnPackDescriptor` hands `spawnOne` a `pack.affixes` that is already
+    // rolled. §14.1's own ordering — "At `zone:ready`, per pack, in ascending
+    // `PackDescriptor.id`" — is what fixes the stream, so the sort is
+    // asserted here rather than assumed of `world`.
+    resetAffixStore(this._affixStore);
+    this._rollPackAffixes(world);
+
     runSpawnPass({
       ctx, world, actors, nav, ai: this,
       store: this._spawnStore, perception: this._perception,
       field: this._entryField, safety: this._spawnSafety,
     });
+
+    // AI-8 — §5.8's name lands on the actor only after it exists. The draws
+    // themselves already happened above, in §14.1's order; this pass spends
+    // nothing and only assigns.
+    this._nameUniques(world, actors);
+  }
+
+  /**
+   * AI-8 — `06` §14.1 rows 1/1'/2, per pack, ascending `PackDescriptor.id`.
+   *
+   * Two things this pass does NOT do, both disclosed:
+   *   - It rolls for every champion/unique pack `world` produced, including
+   *     the Bonereach and Altar packs whose `archetypeId` is `null` and which
+   *     therefore spawn nothing (O-113 — `src/world/data/zones.js` ships
+   *     `bestiary: []` for both zones). §14.1 schedules the draw per PACK,
+   *     not per spawned monster, so skipping them would be this file
+   *     inventing a stream position `06` does not describe.
+   *   - It does not touch `pack.rank`. `07-world-gen.md` §8.3 step 4 rolled
+   *     it and `07` §8.4 fixed the exclusions; `ai` reads it.
+   */
+  _rollPackAffixes(world) {
+    this._pendingUniqueNames.clear();
+    const packs = (world && world.packs) || [];
+    if (packs.length === 0) return;
+    const ordered = packs.slice().sort((a, b) => a.id - b.id);
+    for (let i = 0; i < ordered.length; i++) {
+      const pack = ordered[i];
+      if (!rankCarriesAffixes(pack.rank)) continue;
+      const scope = this._promotedArchetypes(pack);
+      // §14.1 row 1 / 1' — 2 draws for a champion, 3 (+ redraws) for a
+      // unique, from `ai`'s own single fork (see `./rank.js`'s header on the
+      // `06` §14.1 vs `07` §8.3 step 5 disagreement over which stream).
+      const n = rollAffixesImpl(pack.rank, pack.mlvl, this._rng, this._affixRoll, scope);
+      if (n > 0 && Array.isArray(pack.affixes)) {
+        pack.affixes.length = 0;
+        for (let k = 0; k < this._affixRoll.length; k++) pack.affixes.push(this._affixRoll[k]);
+      }
+      // §14.1 row 2 — "two draws ... taken immediately after its affixes".
+      if (pack.rank === 'unique') {
+        rollUniqueName(this._rng, this._uniqueName);
+        this._pendingUniqueNames.set(pack.id, this._uniqueName.name);
+      }
+    }
+  }
+
+  /** The archetypes that will actually CARRY the pack's affixes — `06` §6.3's
+   * eligibility scope. `06` §5.7 promotes by roster position (champions: the
+   * members with the lowest `SpawnPoint.id`, which §10.1 maps to leading
+   * roster indices; unique: index 0 plus minions everywhere else), so this is
+   * a deterministic function of the template and the count, drawing nothing.
+   * Returns a reused array — read it immediately. */
+  _promotedArchetypes(pack) {
+    const out = this._packArchetypes;
+    out.length = 0;
+    const templateId = pack.archetypeId;
+    if (!templateId) return out;
+    const count = isPackTemplateId(templateId) ? effectivePackCount(templateId, pack.count | 0) : (pack.count | 0);
+    const roster = isPackTemplateId(templateId) ? resolveRoster(templateId, count) : null;
+    if (!roster || roster.length === 0) {
+      out.push(templateId); // a bestiary id used directly as the pack's archetype
+      return out;
+    }
+    const ranks = promotionRanks(roster.length, pack.rank);
+    for (let i = 0; i < roster.length; i++) {
+      if (!rankCarriesAffixes(ranks[i])) continue;
+      if (out.indexOf(roster[i]) < 0) out.push(roster[i]);
+    }
+    if (out.length === 0) out.push(roster[0]);
+    return out;
+  }
+
+  /** AI-8 — assigns §5.8's already-drawn name to each unique that spawned.
+   * `Actor.name` is the field `01-data-model.md` §2 carries for it and
+   * `src/actors/pool.js#acquire` seeds it with `archetypeId`; `06` §6.7's
+   * unique row is the consumer ("plus a floating name plate"). */
+  _nameUniques(world, actors) {
+    if (this._pendingUniqueNames.size === 0) return;
+    const packs = (world && world.packs) || [];
+    for (let i = 0; i < packs.length; i++) {
+      const pack = packs[i];
+      const name = this._pendingUniqueNames.get(pack.id);
+      if (!name || !Array.isArray(pack.members)) continue;
+      for (let k = 0; k < pack.members.length; k++) {
+        const actor = actors.resolve(pack.members[k]);
+        if (actor && actor.rank === 'unique') { actor.name = name; break; }
+      }
+    }
+  }
+
+  /**
+   * AI-8 — records `affixIds` on `actor` and folds `06` §6.1/§6.2's stat
+   * contribution into its `difficulty` source layer.
+   *
+   * Why `difficulty` and not one of the other three settable layers
+   * (`01-data-model.md` §4.2 allows `equipment`/`skills`/`status`/
+   * `difficulty`): `06` §6.2's `swift` row names it outright — the affix
+   * stats "enter through the `difficulty`-adjacent affix stat layer" — and it
+   * is the only one of the four that is not already owned by something else
+   * on a monster. It is unused today: no difficulty-tier system exists
+   * anywhere in `src/` (finding O-97, `AI-11`/M6). When one lands it must
+   * MERGE into this layer rather than replace it, because `setSourceLayer`
+   * stores the object wholesale. Flagged here, at the exact call site.
+   */
+  _applyAffixes(actor, affixIds) {
+    const idx = actor.poolIndex;
+    if (idx < this._affixStore.capacity) setActorAffixes(this._affixStore, idx, affixIds);
+    if (!affixIds || affixIds.length === 0) return;
+    const actors = this._ctx.get('actors');
+    if (typeof actors.setSourceLayer !== 'function') return; // a stub `ctx` — degrade, never throw
+    // A FRESH object per actor: `setSourceLayer` stores the reference on the
+    // actor, so a shared scratch would make every champion in the zone alias
+    // the last one's layer — the same class of bug `spawn.js` hit with
+    // `actors.ref()`'s shared scratch (see its own comment).
+    actors.setSourceLayer(actor, 'difficulty', affixLayer(affixIds, actor.level, undefined, DEFAULT_TIER));
   }
 
   // ─── Bestiary accessors (02-api-contracts.md §12) ──────────────────────
@@ -472,10 +681,11 @@ export class AiSystem {
     }
 
     const actors = this._ctx.get('actors');
+    const effectiveRank = rank || 'normal';
     const actor = actors.spawn({
       kind: 'monster',
       archetypeId,
-      rank: rank || 'normal',
+      rank: effectiveRank,
       level: mlvl,
       team: 1,
       x,
@@ -487,12 +697,39 @@ export class AiSystem {
     });
     if (!actor) return null;
 
-    // `06` §2.0: "every row is bestiaryValue × mlvlMult(n), evaluated at
-    // full precision and rounded ONCE" — this ticket's own reading scope
-    // has only the pure mlvl functions (no rank/difficulty tables), so
-    // `rank`/difficulty beyond 'normal'/Instruction do not further scale
-    // life here; see the header above.
-    actor.life = Math.round(row.baseLife * lifeMult(mlvl));
+    // AI-8 — `06` §5.7's promotion has to reach the actor's affixes BEFORE
+    // its life is read below, because `stoneskin`/the immunity affixes go
+    // into the composed StatBlock and `actors.stats()` is what supplies that
+    // life. `06` §5.7: a champion pack's ONE rolled affix is shared by "the
+    // members promoted to `champion`" and a unique's three by the unique and
+    // "every minion" — the un-promoted `normal` members of a champion pack
+    // get none. `src/ai/spawn.js#spawnPackDescriptor` (AI-7, outside this
+    // ticket's grant) hands the pack's whole `affixes` array to EVERY member
+    // regardless of that member's own rank; the `rankCarriesAffixes` guard
+    // here is where §5.7 is enforced instead. Reported, not edited there.
+    this._applyAffixes(actor, rankCarriesAffixes(effectiveRank) ? affixes : null);
+
+    // `03` §10.1's product is `bestiaryValue × mlvlMult × rankMult ×
+    // difficultyMult`; `actors.stats()` (ACTR-24) composes the first three
+    // and rounds once, exactly as §10.1 requires.
+    //
+    // This line used to read `round(row.baseLife × lifeMult(mlvl))` — no rank
+    // term — and it was not merely incomplete, it was CLOBBERING a value
+    // `actors` had already got right: `ActorsSystem.spawn()` ends with
+    // `actor.life = statsPure(actor).maxLife` (read off `src/actors/index.js`,
+    // not assumed), so the actor arrived here with 351 and left with 88. §5.7
+    // promotion was therefore inert on the one number that makes a champion a
+    // champion, and MB3/MB4 are unmeasurable through the real pipeline while
+    // that holds. Recomposing here rather than deleting the line outright:
+    // `_applyAffixes` above ran AFTER `actors.spawn()` composed, so the affix
+    // layer is not in that snapshot, and an affix that moves `maxLife` (none
+    // of the nine does today) must not silently miss.
+    //
+    // Identical for `rank: 'normal'` (`rankMult.normal.life === 1.0`), which
+    // is every pre-existing caller in the tree. `difficultyMult` is still
+    // absent — no tier system exists in `src/` (O-97, `AI-11`/M6); this line
+    // does not invent one.
+    actor.life = actors.stats(actor).maxLife;
     // `actor.baseXp` — see this file's header ("a documented,
     // forward-compatible gap... this is that ticket").
     actor.baseXp = row.baseXp;
@@ -598,6 +835,81 @@ export class AiSystem {
    * @param {number} maxActive */
   setDensityBudget(maxActive) {
     this._spawnStore.densityBudget = Math.max(0, maxActive | 0);
+  }
+
+  // ─── AI-8: champions, uniques, affixes (02-api-contracts.md §12) ────────
+
+  /**
+   * `rollAffixes(rank, mlvl, rng, out) => int` — `02-api-contracts.md` §12,
+   * contracted, and `06` §14.1 rows 1/1'. A thin forward into `./rank.js`.
+   *
+   * The fifth parameter is this file's addition, not the contract's: §12's
+   * signature carries no archetype while `06` §6.3's eligibility is stated
+   * per archetype and MB10 asserts "never an ineligible affix for the
+   * archetype". Omit it and every affix is eligible, which is exactly
+   * `bone_ranker`'s own §6.3 row. `rng` defaults to `ai`'s own single fork
+   * (`06` §14: "one `ctx.rng.fork()` in `init()` and never re-forks") so a
+   * caller that has no stream of its own cannot accidentally take a second.
+   *
+   * @param {string} rank @param {number} mlvl @param {object} [rng]
+   * @param {string[]} out @param {string|string[]} [archetypeIds]
+   * @returns {number}
+   */
+  rollAffixes(rank, mlvl, rng, out, archetypeIds) {
+    return rollAffixesImpl(rank, mlvl, rng || this._rng, out, archetypeIds);
+  }
+
+  /** `affixStats(affixId, mlvl, out?) => object` — `02-api-contracts.md` §12,
+   * contracted. The fourth parameter is this file's addition: `06` §6.4's
+   * `immunityValue` is tier-gated and §12's signature has no tier. Defaults
+   * to Instruction, the only tier the game can be played at today (O-97).
+   * @param {string} affixId @param {number} mlvl @param {object} [out]
+   * @param {string} [tier] */
+  affixStats(affixId, mlvl, out, tier) {
+    return affixStatsImpl(affixId, mlvl, out, tier || DEFAULT_TIER);
+  }
+
+  /** AI-8, not contracted — an actor's rolled affixes, read back out of
+   * `ai`'s own store into a REUSED scratch (read/copy immediately, never
+   * stash it, same discipline as `brainOf`). `Actor` itself carries no
+   * `affixes` field and `src/actors/pool.js#acquire` drops `SpawnSpec.affixes`
+   * on the floor — see this file's constructor comment.
+   * @param {object} actor @returns {string[]} */
+  affixesOf(actor) {
+    const out = this._affixScratch;
+    out.length = 0;
+    if (!actor) return out;
+    actorAffixes(this._affixStore, actor.poolIndex, out);
+    return out;
+  }
+
+  /** AI-8, not contracted — allocation-free membership test, for the callers
+   * (`fx`, `combat` riders) that only need one answer.
+   * @param {object} actor @param {string} affixId @returns {boolean} */
+  hasAffix(actor, affixId) {
+    return !!actor && actorHasAffix(this._affixStore, actor.poolIndex, affixId);
+  }
+
+  /** AI-8, not contracted — `06` §6.7's telegraph hooks, the rank row and the
+   * per-affix rows, for `fx`/`audio`/`ui`. Frozen table rows, handed out
+   * directly (`Alloc: no`); `null` for a rank/affix with no row.
+   * @param {string} rankOrAffixId @returns {object|null} */
+  telegraphOf(rankOrAffixId) {
+    return rankTelegraph(rankOrAffixId) || affixTelegraph(rankOrAffixId);
+  }
+
+  /** AI-8, not contracted — `06` §6.4's tier gate, exposed so `combat`/`ui`
+   * can state the number rather than re-deriving it.
+   * @param {string} [tier] @returns {number} */
+  immunityValue(tier) {
+    return immunityValue(tier);
+  }
+
+  /** AI-8, not contracted — `03` §9.3 / `06` §6.5's affix count for a rank
+   * (1 champion, 3 unique, 3 inherited by a minion, 0 otherwise).
+   * @param {string} rank @returns {number} */
+  affixCountForRank(rank) {
+    return affixCountForRank(rank);
   }
 
   /** AI-7, not contracted — `./spawn.js`'s own counters (`SPAWN_PUSHED`,

@@ -639,12 +639,28 @@ test('REAL PIPELINE: spawned monsters carry composed life (ACTR-24) and their pa
   await world.enterZone('ashen_wastes', 'portal_from_town', { runIndex: 0 });
   const monsters = actors.all.filter((a) => a.kind === 'monster');
   assert.ok(monsters.length > 0);
+  // AI-8 note: the rank term is part of this product. When this test was
+  // written every monster spawned at `rank: 'normal'` because §5.7 promotion
+  // was inert on life — `spawnOne` re-derived `baseLife x lifeMult(mlvl)`
+  // with no rank factor and clobbered the composed value `actors.spawn()`
+  // had already got right (a champion arrived at 351 and left at 88). AI-8
+  // corrected that line, so `03` §9.3's Life column now reaches the actor and
+  // the expectation here has to carry it too. Transcribed from §9.3's own
+  // table (03-combat-math.md L886-L892), not imported from the composition
+  // under test.
+  const RANK_LIFE = { normal: 1.0, minion: 1.6, champion: 4.0, unique: 7.0, boss: 1.0 };
+  const byRank = {};
   for (const m of monsters) {
     assert.equal(m.level, 6, 'ashen_wastes mlvl is 6');
-    const expected = Math.round(BESTIARY[m.archetypeId].baseLife * lifeMult(6));
-    assert.equal(m.life, expected, `${m.archetypeId} life at mlvl 6`);
+    const mult = RANK_LIFE[m.rank];
+    assert.ok(mult !== undefined, `unexpected rank '${m.rank}'`);
+    byRank[m.rank] = (byRank[m.rank] || 0) + 1;
+    const expected = Math.round(BESTIARY[m.archetypeId].baseLife * lifeMult(6) * mult);
+    assert.equal(m.life, expected, `${m.archetypeId}/${m.rank} life at mlvl 6 (§9.3 x${mult})`);
     assert.ok(m.life > 1, 'ACTR-24: a monster is never left at life 1');
   }
+  assert.ok(byRank.champion > 0 || byRank.unique > 0,
+    'this seed must promote somebody, or the rank term above is unmeasured');
   // Roster order: the pack's k-th member sits on its k-th SpawnPoint by id.
   const pack = world.packs[0];
   const pts = world.spawnPoints.filter((p) => p.packIndex === pack.id).sort((a, b) => a.id - b.id);
@@ -654,7 +670,7 @@ test('REAL PIPELINE: spawned monsters carry composed life (ACTR-24) and their pa
     assert.equal(a.archetypeId, roster[k], `member ${k} archetype`);
     assert.ok(Math.abs(a.x - pts[k].x) < 1e-6 && Math.abs(a.z - pts[k].z) < 1e-6, `member ${k} sits on SpawnPoint ${pts[k].id}`);
   }
-  console.log(`  real spawn: ${monsters.length} monsters, mlvl 6, life composed per ACTR-24 (e.g. bone_ranker ${Math.round(BESTIARY.bone_ranker.baseLife * lifeMult(6))})`);
+  console.log(`  real spawn: ${monsters.length} monsters, mlvl 6, life composed per ACTR-24 x §9.3's rank term (${Object.entries(byRank).map(([k, v]) => `${k} ${v}`).join(', ')}; bare bone_ranker ${Math.round(BESTIARY.bone_ranker.baseLife * lifeMult(6))})`);
 });
 
 test('REAL PIPELINE: the pass is deterministic — the same world seed twice gives an identical roster, position and rank order', async () => {

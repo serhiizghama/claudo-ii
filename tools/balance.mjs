@@ -1954,9 +1954,15 @@ function mbFight(buildId, target) {
 }
 
 // ---------------------------------------------------------------------------
-// `06` §6.1/§6.3/§6.5's affix tables — transcribed here because
-// `ai.rollAffixes` and its data file DO NOT EXIST in the tree (`06` §13 step
-// 8 has not shipped; verified structurally by `checkMB10`, not assumed).
+// `06` §6.1/§6.3/§6.5's affix tables — transcribed here.
+//
+// Originally because `ai.rollAffixes` and its data file did not exist in the
+// tree. AI-8 shipped both, and this transcription is KEPT rather than replaced
+// by an import: MB3/MB4/MB7/MB8 are verdicts on whether the SPEC's own numbers
+// hold, and importing the values under test would make them circular. What
+// changed is that the two are now cross-checked against each other every run —
+// `MB10.shipped` — so "the harness models a monster the game cannot spawn"
+// cannot happen silently.
 // ---------------------------------------------------------------------------
 const AFFIXES = Object.freeze({
   burning: Object.freeze({ group: 'immunity', weight: 12, danger: 2, immunity: 'fire' }),
@@ -2489,15 +2495,23 @@ function checkMB9(ZONE_DESCRIPTORS_BY_ID, checks) {
 
 /** MB10 — `ai.rollAffixes` over 100 000 draws matches §6.1's weights; never
  * two affixes from one group on a unique; never an excluded pair; never an
- * ineligible affix. Split in two: the DRAW half cannot run (the method does
- * not exist — checked structurally, not assumed), the TABLE half can and
- * does. */
-function checkMB10(AiSystem, checks) {
-  const hasRoll = typeof AiSystem.prototype.rollAffixes === 'function';
-  checks.push({
-    id: 'MB10.draws', severity: 'fail', scope: 'ai.rollAffixes over 100 000 draws', pass: null,
-    lines: [`SKIP — \`ai.rollAffixes\` does not exist on AiSystem (typeof AiSystem.prototype.rollAffixes === '${typeof AiSystem.prototype.rollAffixes}', checked here, not assumed). \`06\` §13 step 8 (champions, uniques, affixes) has not shipped, and \`src/ai/index.js\`'s own header lists \`rollAffixes\`/\`affixStats\` among the methods it does not implement. A weight-distribution assertion over a function that does not exist cannot be faked into a pass; the tables that function will draw from are asserted separately below (MB10.tables)${hasRoll ? ' — NOTE: the method now EXISTS, so this row must be replaced by the real 100 000-draw sweep' : ''}`],
-  });
+ * ineligible affix. Split in two: the DRAW half sweeps the shipped code, the
+ * TABLE half checks this file's own transcription AND cross-checks it against
+ * the shipped data file.
+ *
+ * This row was a SKIP until AI-8 shipped, on the ground that the method did
+ * not exist. O-119's rule — a harness that hardcodes "what does not exist yet"
+ * must be revisited by the ticket that closes that "yet" — is why it is a real
+ * sweep now and not a stale quotation of the moment TEST-9 was written. */
+function checkMB10(AiSystem, rank, affixData, RngClass, seed, checks) {
+  if (typeof AiSystem.prototype.rollAffixes !== 'function') {
+    checks.push({
+      id: 'MB10.draws', severity: 'fail', scope: 'ai.rollAffixes over 100 000 draws', pass: null,
+      lines: [`SKIP — \`ai.rollAffixes\` does not exist on AiSystem (typeof AiSystem.prototype.rollAffixes === '${typeof AiSystem.prototype.rollAffixes}', checked here, not assumed). A weight-distribution assertion over a function that does not exist cannot be faked into a pass; the tables it will draw from are asserted separately below (MB10.tables)`],
+    });
+  } else {
+    checks.push(...runMB10Sweep(AiSystem, rank, affixData, RngClass, seed));
+  }
 
   const problems = [];
   const totalWeight = Object.values(AFFIXES).reduce((a, x) => a + x.weight, 0);
@@ -2551,9 +2565,144 @@ function checkMB10(AiSystem, checks) {
   checks.push({
     id: 'MB10.tables', severity: 'fail', scope: 'global (06 §6.1/§6.3/§6.5 tables, transcribed here)', pass: problems.length === 0,
     lines: problems.length === 0
-      ? [`weights sum to 100 and to §6.1's own group totals 34/41/25; the §6.5 two-stage champion draw is provably the same distribution as the flat one (max deviation ${maxSchemeDev.toExponential(1)}); every group non-empty for all six eligible archetypes and still non-empty after any single §6.5 removal; no legal unique triple exceeds the 7-point danger budget (\`swift + mighty\` structurally impossible — same group). NOTE this asserts the SPEC's tables as transcribed into this file, NOT shipped \`ai\` data: no affix data file exists in the tree`]
+      ? [`weights sum to 100 and to §6.1's own group totals 34/41/25; the §6.5 two-stage champion draw is provably the same distribution as the flat one (max deviation ${maxSchemeDev.toExponential(1)}); every group non-empty for all six eligible archetypes and still non-empty after any single §6.5 removal; no legal unique triple exceeds the 7-point danger budget (\`swift + mighty\` structurally impossible — same group)`]
       : problems,
   });
+
+  checks.push(crossCheckShippedAffixTable(affixData));
+}
+
+/**
+ * MB10's transcription half, second row: this file's `AFFIXES` table against
+ * the SHIPPED `src/ai/data/affixes.js`.
+ *
+ * Two independent transcriptions of the same spec section are worth exactly
+ * as much as the check that they agree. Without this row a divergence between
+ * the harness's numbers and the game's would show up as MB3/MB4/MB7 verdicts
+ * that describe a monster nobody can spawn.
+ */
+function crossCheckShippedAffixTable(affixData) {
+  if (!affixData) {
+    return {
+      id: 'MB10.shipped', severity: 'fail', scope: 'src/ai/data/affixes.js vs this file\'s transcription', pass: null,
+      lines: ['SKIP — no affix data file in the tree to cross-check against'],
+    };
+  }
+  const problems = [];
+  const shipped = affixData.MONSTER_AFFIXES;
+  const here = Object.keys(AFFIXES);
+  const there = Object.keys(shipped);
+  if (here.length !== there.length || here.some((id, i) => id !== there[i])) {
+    problems.push(`affix ids differ: this file has [${here.join(', ')}], the shipped table has [${there.join(', ')}]`);
+  }
+  for (const id of here) {
+    const a = AFFIXES[id];
+    const b = shipped[id];
+    if (!b) { problems.push(`'${id}' is not in the shipped table`); continue; }
+    if (a.group !== b.group) problems.push(`'${id}': group '${a.group}' here vs '${b.group}' shipped`);
+    if (a.weight !== b.weight) problems.push(`'${id}': weight ${a.weight} here vs ${b.weight} shipped`);
+    if (a.danger !== b.danger) problems.push(`'${id}': danger ${a.danger} here vs ${b.danger} shipped`);
+    // The immunity three: this file names the element, the shipped table
+    // names the StatBlock field. Compared through the mapping, not by shape.
+    const shippedImmunity = b.immunityResist ? { fireResist: 'fire', lightResist: 'lightning', coldResist: 'cold' }[b.immunityResist] : undefined;
+    if ((a.immunity || undefined) !== shippedImmunity) problems.push(`'${id}': immunity '${a.immunity}' here vs '${shippedImmunity}' shipped`);
+  }
+  for (const g of AFFIX_GROUPS) {
+    if (AFFIX_GROUP_WEIGHTS[g] !== affixData.AFFIX_GROUP_WEIGHTS[g]) {
+      problems.push(`group '${g}': weight ${AFFIX_GROUP_WEIGHTS[g]} here vs ${affixData.AFFIX_GROUP_WEIGHTS[g]} shipped`);
+    }
+  }
+  for (const archetypeId of Object.keys(AFFIX_INELIGIBLE)) {
+    const mine = [...AFFIX_INELIGIBLE[archetypeId]].sort().join(',');
+    const theirs = [...(affixData.AFFIX_INELIGIBLE[archetypeId] || [])].sort().join(',');
+    if (mine !== theirs) problems.push(`'${archetypeId}' ineligible: [${mine}] here vs [${theirs}] shipped`);
+  }
+  const mineX = AFFIX_EXCLUSIONS.map((x) => `${[x.a, x.b].sort().join('+')}@${x.archetype || '*'}`).sort().join(' ');
+  const theirsX = affixData.AFFIX_EXCLUSIONS.map((x) => `${[x.a, x.b].sort().join('+')}@${x.archetypeId || '*'}`).sort().join(' ');
+  if (mineX !== theirsX) problems.push(`exclusion pairs: [${mineX}] here vs [${theirsX}] shipped`);
+
+  return {
+    id: 'MB10.shipped', severity: 'fail', scope: 'src/ai/data/affixes.js vs this file\'s transcription', pass: problems.length === 0,
+    lines: problems.length === 0
+      ? [`all 9 affixes agree on group, weight, danger and immunity element; the 34/41/25 group weights, all ${Object.keys(AFFIX_INELIGIBLE).length} §6.3 eligibility rows and all 3 §6.5 exclusion pairs agree. The harness's MB3/MB4/MB7/MB8 verdicts therefore describe the monster the game actually spawns — two independent transcriptions of §6.1/§6.3/§6.5, cross-checked rather than assumed`]
+      : problems,
+  };
+}
+
+/**
+ * MB10's draw half — the 100 000-draw sweep, over the SHIPPED draw code.
+ *
+ * MB10 names `ai.rollAffixes`, so the contracted method is what is checked;
+ * the sweep itself then runs through the module function it forwards to
+ * (`src/ai/rank.js`), which is the same code and needs no engine. The forward
+ * is not assumed: both are driven from equally-seeded streams and compared.
+ */
+function runMB10Sweep(AiSystem, rank, affixData, RngClass, seed) {
+  const out = [];
+  const ai = new AiSystem(); // never init()ed — rank.js contracts that it needs no ctx
+  const checks = [];
+
+  // 1. The contracted entry point IS the module function.
+  let forwards = true;
+  for (let i = 0; i < 200; i++) {
+    const s = (seed + i) >>> 0;
+    rank.rollAffixes('champion', 10, new RngClass(s), out, 'bone_ranker');
+    const viaModule = out[0];
+    ai.rollAffixes('champion', 10, new RngClass(s), out, 'bone_ranker');
+    if (out[0] !== viaModule) { forwards = false; break; }
+  }
+
+  const N = 100000;
+  const AFFIX_IDS = Object.keys(affixData.MONSTER_AFFIXES);
+  const counts = Object.fromEntries(AFFIX_IDS.map((id) => [id, 0]));
+  const rng = new RngClass(seed >>> 0);
+  let ineligibleChampion = 0;
+  for (let i = 0; i < N; i++) {
+    ai.rollAffixes('champion', 10, rng, out, 'bone_ranker');
+    counts[out[0]]++;
+    if (!rank.isEligible(out[0], 'bone_ranker')) ineligibleChampion++;
+  }
+  let worst = 0;
+  let worstId = '';
+  const cells = [];
+  for (const id of AFFIX_IDS) {
+    const observed = (counts[id] / N) * 100;
+    const expected = affixData.MONSTER_AFFIXES[id].weight; // §6.1's weights sum to 100, so they ARE percentages
+    const dev = Math.abs(observed - expected);
+    if (dev > worst) { worst = dev; worstId = id; }
+    cells.push(`${id} ${observed.toFixed(2)}/${expected}`);
+  }
+
+  // 2. The three violation classes, over uniques, across every §6.3 row.
+  const ELIGIBLE = Object.keys(affixData.AFFIX_INELIGIBLE).filter((id) => id !== 'molgrim');
+  let twoFromOneGroup = 0;
+  let excluded = 0;
+  let ineligibleUnique = 0;
+  let wrongCount = 0;
+  const uniqueRng = new RngClass((seed ^ 0x9e3779b9) >>> 0);
+  for (let i = 0; i < N; i++) {
+    const archetypeId = ELIGIBLE[i % ELIGIBLE.length];
+    const n = ai.rollAffixes('unique', 10, uniqueRng, out, archetypeId);
+    if (n !== 3) wrongCount++;
+    const groups = out.map((id) => affixData.MONSTER_AFFIXES[id].group);
+    if (new Set(groups).size !== groups.length) twoFromOneGroup++;
+    for (const id of out) if (!rank.isEligible(id, archetypeId)) ineligibleUnique++;
+    for (let a = 0; a < out.length; a++) {
+      for (let b = a + 1; b < out.length; b++) if (rank.isExcludedPair(out[a], out[b], archetypeId)) excluded++;
+    }
+  }
+
+  const violations = twoFromOneGroup + excluded + ineligibleUnique + ineligibleChampion + wrongCount;
+  checks.push({
+    id: 'MB10.draws', severity: 'fail', scope: `ai.rollAffixes, ${N} champion draws + ${N} unique rolls`,
+    pass: forwards && worst <= 1.5 && violations === 0,
+    lines: [
+      `weights: worst deviation ${worst.toFixed(3)} pp on '${worstId}' against MB10's ±1.5 (observed/§6.1, %): ${cells.join(', ')}`,
+      `violations over ${N} unique rolls across all ${ELIGIBLE.length} eligible archetypes: two-from-one-group ${twoFromOneGroup}, excluded pair ${excluded}, ineligible affix ${ineligibleUnique + ineligibleChampion}, wrong affix count ${wrongCount} — MB10 requires 0 of each`,
+      `the sweep runs through the CONTRACTED \`ai.rollAffixes\` on an AiSystem that was never init()ed, and 200 equally-seeded pairs confirm it returns exactly what \`src/ai/rank.js#rollAffixes\` returns: ${forwards ? 'identical' : 'DIVERGED — the contracted method is not the module function'}`,
+    ],
+  });
+  return checks;
 }
 
 /** MB11 — every pack template resolves to exactly `count` members at every
@@ -2912,10 +3061,12 @@ function checkMB16MB17(zones, checks) {
 async function buildMonsterChecks(seed) {
   // Every import below is dynamic ON PURPOSE — see this file's TEST-9 header
   // block: `--skills`'s module graph must stay exactly what TEST-8 shipped.
-  const [bestiary, aiIndex, aiNav, navIndex, physics, zonesData, ridgewalk, wastesGen, bonereachGen,
+  const [bestiary, aiIndex, aiRank, affixData, aiNav, navIndex, physics, zonesData, ridgewalk, wastesGen, bonereachGen,
     height, raster, spawn, events, rng, swarmBrain, archerBrain, shamanBrain, maulsmithBrain, crawlerBrain] = await Promise.all([
     import('../src/ai/data/bestiary.js'),
     import('../src/ai/index.js'),
+    import('../src/ai/rank.js'),
+    import('../src/ai/data/affixes.js'),
     import('../src/ai/nav.js'),
     import('../src/nav/index.js'),
     import('../src/physics/index.js'),
@@ -2949,7 +3100,7 @@ async function buildMonsterChecks(seed) {
   checkMB7(bestiary, checks);
   checkMB8(bestiary, checks);
   checkMB9(zonesData.ZONE_DESCRIPTORS_BY_ID, checks);
-  checkMB10(aiIndex.AiSystem, checks);
+  checkMB10(aiIndex.AiSystem, aiRank, affixData, rng.Rng, seed, checks);
   checkMB11(checks);
   checkMB12(navIndex.NavSystem, checks);
   checkMB13(aiNav.FIELD_REBUILD_CADENCE_STEPS, checks);

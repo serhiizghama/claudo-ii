@@ -12,7 +12,7 @@
 // Sources, all transcribed rather than derived:
 //   §6.1  the nine rows: group, weight, and `03-combat-math.md` §9.4's effect
 //   §6.2  the mechanical detail `03` leaves open (radii, cadences, fractions)
-//   §6.3  per-archetype eligibility (stated in the spec as EXCLUSIONS)
+//   §6.3  per-archetype eligibility (INVERTED — see `AFFIX_INELIGIBLE`)
 //   §6.4  `immunityValue(tier)` — 85 at Instruction, 100 above it
 //   §6.5  the danger points, the three hard exclusion pairs
 //   §6.7  the rank auras and the per-affix telegraph rows
@@ -198,7 +198,16 @@ export const MONSTER_AFFIXES = Object.freeze({
 export const AFFIX_IDS = Object.freeze(Object.keys(MONSTER_AFFIXES));
 
 /**
- * `06` §6.3, stored as the spec states it — the EXCLUDED set per archetype.
+ * `06` §6.3, INVERTED — the excluded set per archetype.
+ *
+ * The spec's own table prints the ELIGIBLE ids in three columns (one per
+ * group) and names the exclusions only in its prose "Excluded because"
+ * column, so this is a derivation and not a transcription. It is stored this
+ * way because `bone_ranker` — the archetype every unrestricted call falls
+ * back to — is "all 3 / all 3 / all 3", and an empty array is the honest
+ * shape for that. The inversion is checked against the spec's own eligible
+ * columns by `tools/balance.mjs`'s `MB10.shipped` row, not trusted.
+ *
  * Every archetype not listed with an id is eligible for it. `molgrim` takes
  * no affix at all ("The boss takes no affixes. His three phases are his
  * affixes") and is therefore the one row that excludes all nine.
