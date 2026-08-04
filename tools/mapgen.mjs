@@ -25,6 +25,11 @@
 //   -> world.current.chests(I2)
 //   -> world.packs / world.spawnPoints / world._spawnReport  (I3, I4)
 //   -> world.staticFootprints (I6, I8)
+//   -> nav.regionAt / nav.walkable  (I5)
+//   -> world._altarLayout   (I5's boss start, exit portal pad and anchor
+//                            tables; I7's pillar centres — all read off the
+//                            layout `enterZone` actually published, never
+//                            re-imported as constants)
 //   -> world._wastesBoundary / _wastesLayout / _bonereachLayout / _bonereachExit
 //
 // Nothing below re-implements a generator stage, a rasteriser pass or a
@@ -64,7 +69,7 @@
 //     method read as full while it was not).
 //
 // ---------------------------------------------------------------------------
-// The sweep size: 1 200 layouts, not 5 400, and not 1 800
+// The sweep size: 1 800 layouts, not 5 400
 // ---------------------------------------------------------------------------
 // `12` §5.5 says "5 400 layouts — three zones x 200 world seeds x three run
 // indices". 3 x 200 x 3 = 1 800. The missing factor of three is `07` §7.1's
@@ -80,21 +85,16 @@
 // tier and no tier is reachable from a run. Inventing one is out of scope, so
 // `--difficulty=` exits 2 naming its owning ticket rather than faking a 3x.
 //
-// Of the three zones, `src/world/gen/altar.js` DOES NOT EXIST — `WRLD-8` is
-// not built, and `world.enterZone('altar_of_instruction', …)` falls through
-// to `buildBoundaryFootprints`, WRLD-1's four placeholder perimeter walls,
-// with no rooms, no arena, no anchors, no packs and no chests. That is not a
-// zone layout and this file will not check invariants against it. The altar
-// third of `I1`/`I2`/`I3`, and `I5`/`I7` outright, are reported as loud
-// counted SKIPs naming `WRLD-8`.
-//
-// So: 2 zones x 200 world seeds x 3 runIndex = **1 200 layouts**, which is
-// what this file runs and prints. The run header always states the
-// 1 200 / 1 800 / 5 400 accounting so the number can never be read as the
-// spec's own.
+// All three zones are built (`WRLD-8` landed `src/world/gen/altar.js`), so
+// this file runs 3 x 200 x 3 = **1 800 layouts**. Both the run header and the
+// `--json` body derive that arithmetic from `zoneIsBuilt()` — the same
+// filesystem probe `ZONE_PLAN` uses — so the accounting line can never
+// disagree with what was actually swept. If a generator file is removed the
+// header re-states the reduced product and the missing zone's invariants come
+// back as loud counted SKIPs; nothing about the accounting is a literal.
 //
 // ---------------------------------------------------------------------------
-// The five rulings that SCOPE the invariants (read them, do not re-litigate)
+// The seven rulings that SCOPE the invariants (read them, do not re-litigate)
 // ---------------------------------------------------------------------------
 // D-77  `|connected| in [9,14]` is a DISTRIBUTION property, not an
 //       invariant; 100% is unreachable (structural range is [6,16]). It is
@@ -131,6 +131,36 @@
 //       it there in `I4`'s own native +-20% band, and print EVERY
 //       floor-bound layout in a separate list tagged `FLOOR-CLAMPED` with its
 //       achieved density. Bonereach stays at its own band and 600/600.
+// D-90  `I8` on `altar_of_instruction` is a counted NOTE, not a FAIL. `07`
+//       §5.3's guarantee **G6** ("Cover and line of sight") spends three
+//       bullets ACCEPTING the occlusion: "The six pillars are ... 0.90 m
+//       radius, 7.0 m tall ... Against the Occlusion Plane at `s = 0` they
+//       are far over 1.00 m, so a pillar *does* occlude a player standing
+//       immediately north of it. **That is accepted and deliberate**", and it
+//       sizes the band itself — `s <= (7.0 - 1.0) / 1.206 = 4.98 m`, "six of
+//       them, 53.9 m2 total = 5.9 % of the arena", floor-marked with an
+//       authored scorch decal so it is not a surprise. The occlusion is
+//       DESIGNED. Treated exactly as Bonereach is under D-83: honest
+//       measurement, threshold untouched, loud counted NOTE carrying the
+//       measured fraction and G6's own arithmetic beside it. The `wastes`
+//       `I8` stays a FAIL — nothing in `07` licenses that one.
+// D-91  `I7`'s literal band `114 +- 6` is unreachable by the SHIPPED
+//       geometry, which measures **96** blocked cells on 600/600. §5.4
+//       derives 114 as `6 x ceil(pi * (0.9 + 0.3)^2 / 0.25) = 6 x 19`, an
+//       AREA estimate; `passN4FootprintStamp` blocks a cell when its CENTRE
+//       falls within `radius + dilation`, and cell-centre sampling of a
+//       r = 1.20 m disc yields 16..21 cells depending on the phase of the
+//       centre against the lattice. The six spec-mandated pillar bearings
+//       (r = 11.5 m at 0/60/…/300 degrees) all land in the 16-cell alignment
+//       on a grid whose centres are odd multiples of 0.25 m, so 6 x 16 = 96,
+//       deterministically. So `I7` is implemented as its INTENT — §5.4's own
+//       "the only blockers inside `r = 17.0 m` are the six pillars": every
+//       blocked cell inside `r = 16.0 m` must be attributable to a pillar
+//       under the stamp's own rule, and all six pillars must actually be
+//       present. That is ASSERTED. The literal `114 +- 6` shortfall is
+//       carried beside it as a counted NOTE with the measured number and the
+//       arithmetic — never asserted (the shipped geometry cannot produce it)
+//       and never silently dropped.
 //
 // ---------------------------------------------------------------------------
 // Determinism (`12.D02`, `ARCHITECTURE.md` rule 4)
@@ -205,11 +235,28 @@ const FIXTURE_SEEDS = Object.freeze([
   Object.freeze({ seed: 0x00000001, zone: 'all', exercises: 'the trivial seed' }),
 ]);
 
-/** The three zones `07` §7.1/§7.2 sweep, and what exists behind each. */
+/** The three zones `07` §7.1/§7.2 sweep, and what exists behind each.
+ *
+ * `built` is resolved from the filesystem, never hardcoded. The first cut of
+ * this file pinned `altar_of_instruction` to `built: false` because
+ * `src/world/gen/altar.js` did not exist when it was written — and it kept
+ * reporting SKIP for three altar invariants after WRLD-8 landed them. A
+ * harness that snapshots what exists is the same defect class as O-106: it
+ * was not measuring the tree, it was quoting a moment. Ask the disk. */
+import { existsSync } from 'node:fs';
+const ZONE_GENERATOR_FILES = Object.freeze({
+  ashen_wastes: ['src/world/gen/ridgewalk.js', 'src/world/gen/wastes.js'],
+  bonereach: ['src/world/gen/bonereach.js'],
+  altar_of_instruction: ['src/world/gen/altar.js'],
+});
+function zoneIsBuilt(zoneId) {
+  const files = ZONE_GENERATOR_FILES[zoneId] || [];
+  return files.length > 0 && files.every((f) => existsSync(new URL(`../${f}`, import.meta.url)));
+}
 const ZONE_PLAN = Object.freeze([
-  Object.freeze({ id: 'ashen_wastes', entryTag: 'portal_from_town', built: true, generator: 'src/world/gen/ridgewalk.js + wastes.js' }),
-  Object.freeze({ id: 'bonereach', entryTag: 'descent', built: true, generator: 'src/world/gen/bonereach.js' }),
-  Object.freeze({ id: 'altar_of_instruction', entryTag: 'altar_entry', built: false, generator: 'src/world/gen/altar.js (WRLD-8 — DOES NOT EXIST)' }),
+  Object.freeze({ id: 'ashen_wastes', entryTag: 'portal_from_town', built: zoneIsBuilt('ashen_wastes'), generator: 'src/world/gen/ridgewalk.js + wastes.js' }),
+  Object.freeze({ id: 'bonereach', entryTag: 'descent', built: zoneIsBuilt('bonereach'), generator: 'src/world/gen/bonereach.js' }),
+  Object.freeze({ id: 'altar_of_instruction', entryTag: 'altar_entry', built: zoneIsBuilt('altar_of_instruction'), generator: 'src/world/gen/altar.js (WRLD-8)' }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -646,6 +693,159 @@ function checkI6(grid, zone, footprints) {
 }
 
 // ---------------------------------------------------------------------------
+// I5 — the boss is reachable and the arena is intact, `07` §7.1
+// ---------------------------------------------------------------------------
+// §7.1, verbatim: "In the Altar: `regionAt(0, +5) === regionAt(entry)`, the
+// exit portal pad is in the same region, and all 12 teleport anchors and 8
+// summon anchors are walkable."
+//
+// Every position comes off `world._altarLayout` — the object
+// `world.enterZone` itself built and published (`bossStart`, `portalPad`,
+// `teleportAnchors`, `summonAnchors`), not a re-import of the module's
+// constants. The literal `(0, +5)` is checked TOO, as an equality against
+// `layout.bossStart`: if the shipped boss start ever drifts off §5.2's number
+// the row says so instead of quietly following it.
+//
+// `regionAt` and `walkable` are `nav`'s own accessors over the live grid.
+// The three clauses are asserted exactly as written; the anchors' region
+// membership is MEASURED beside the walkability clause and printed, because
+// "walkable" and "in the entry region" are not the same statement and §7.1
+// only asks for the first.
+function checkI5(nav, layout, entryRegion) {
+  const boss = layout.bossStart;
+  const pad = layout.portalPad;
+
+  const bossRegion = nav.regionAt(boss.x, boss.z);
+  const padRegion = nav.regionAt(pad.x, pad.z);
+
+  const anchors = [];
+  for (let i = 0; i < layout.teleportAnchors.length; i++) {
+    const a = layout.teleportAnchors[i];
+    anchors.push({ kind: 'teleport', index: i, x: a.x, z: a.z, radius: a.radius, angleDeg: a.angleDeg });
+  }
+  for (let i = 0; i < layout.summonAnchors.length; i++) {
+    const a = layout.summonAnchors[i];
+    anchors.push({ kind: 'summon', index: i, x: a.x, z: a.z, radius: a.radius, angleDeg: a.angleDeg });
+  }
+
+  const badAnchors = [];
+  let anchorsOffRegion = 0;
+  for (const a of anchors) {
+    a.walkable = nav.walkable(a.x, a.z);
+    a.region = nav.regionAt(a.x, a.z);
+    if (a.region !== entryRegion) anchorsOffRegion++;
+    if (!a.walkable) badAnchors.push(a);
+  }
+
+  return {
+    // §5.2's own literal, checked rather than assumed.
+    bossStartIsSpecLiteral: boss.x === 0 && boss.z === 5.0,
+    bossX: boss.x, bossZ: boss.z,
+    bossRegion,
+    bossOk: bossRegion >= 0 && bossRegion === entryRegion,
+    padX: pad.x, padZ: pad.z,
+    padRegion,
+    padOk: padRegion >= 0 && padRegion === entryRegion,
+    teleportCount: layout.teleportAnchors.length,
+    summonCount: layout.summonAnchors.length,
+    anchorCount: anchors.length,
+    badAnchors,
+    anchorsOffRegion,
+    ok: bossRegion >= 0 && bossRegion === entryRegion && padRegion >= 0 && padRegion === entryRegion
+      && badAnchors.length === 0
+      && layout.teleportAnchors.length === 12 && layout.summonAnchors.length === 8,
+  };
+}
+
+/** `07` §7.1 I7 / §5.4 E4 — the arena floor is open. */
+const I7_RADIUS = 16.0; // m — §7.1 "inside r = 16.0 m of the Altar centre"
+const I7_LITERAL = 114; // §5.4: 6 x ceil(pi * (0.9 + 0.3)^2 / 0.25) = 6 x 19
+const I7_LITERAL_BAND = 6; // §7.1 "= 114 +- 6"
+
+// ---------------------------------------------------------------------------
+// I7 — the arena floor is open, `07` §7.1 / §5.4 E4  (ruling D-91)
+// ---------------------------------------------------------------------------
+// The disc is centred on the ARENA centre `(0, 0)` — §5.2's "Arena floor:
+// disc, centre (0, 0), radius 17.0 m" and §5.4 E4's "96 props inside
+// `r < 16.0 m`" are the same disc, and the pillar ring at 11.5 m only lies
+// inside it under that reading. (The "Altar BLOCK" is a different object, at
+// `(0, +19.6)`, well outside the arena; reading I7's "Altar centre" as the
+// block would put the whole disc inside the rim and the alcove and measure
+// nothing. Disclosed, not assumed.)
+//
+// Two numbers, and only one of them is asserted (D-91):
+//
+//   INTENT (asserted) — §5.4's own sentence, "the only blockers inside
+//   `r = 17.0 m` are the six pillars". Every blocked cell inside the disc
+//   must be attributable to a pillar under `passN4FootprintStamp`'s OWN rule
+//   (cell centre within `pillar.radius + RASTER.DILATION`), and all six
+//   pillars must actually contribute cells — an arena that lost its pillars
+//   would otherwise pass a "nothing else blocks" test trivially.
+//
+//   LITERAL (measured, reported, never asserted) — the `114 +- 6` count.
+//
+// `NAV_FLAG.blocked` and "not walkable" are counted separately: `raster.js`
+// documents that a cell can be neither (outside every ground region), so
+// collapsing them would hide a third state if one ever appeared inside the
+// arena.
+function checkI7(grid, layout) {
+  const { width, height, cellSize, originX, originZ, flags } = grid;
+  const pillars = layout.pillars;
+  const r2 = I7_RADIUS * I7_RADIUS;
+
+  let blocked = 0;
+  let notWalkable = 0;
+  let unattributed = 0;
+  const perPillar = new Int32Array(pillars.length);
+  let firstUnattributed = null;
+
+  for (let cz = 0; cz < height; cz++) {
+    const pz = originZ + (cz + 0.5) * cellSize;
+    if (Math.abs(pz) > I7_RADIUS) continue;
+    for (let cx = 0; cx < width; cx++) {
+      const px = originX + (cx + 0.5) * cellSize;
+      if (px * px + pz * pz > r2) continue;
+      const i = cz * width + cx;
+      const isBlocked = (flags[i] & NAV_FLAG.blocked) !== 0;
+      if (!(flags[i] & NAV_FLAG.walkable)) notWalkable++;
+      if (!isBlocked) continue;
+      blocked++;
+      // The stamp's own predicate, re-applied: `passN4FootprintStamp` blocks
+      // a cell whose CENTRE lies within `radius + DILATION` of the cylinder.
+      let owner = -1;
+      for (let k = 0; k < pillars.length; k++) {
+        const dx = px - pillars[k].x, dz = pz - pillars[k].z;
+        const rr = pillars[k].radius + RASTER.DILATION;
+        if (dx * dx + dz * dz <= rr * rr + 1e-9) { owner = k; break; }
+      }
+      if (owner < 0) {
+        unattributed++;
+        if (!firstUnattributed) firstUnattributed = { x: px, z: pz };
+      } else {
+        perPillar[owner]++;
+      }
+    }
+  }
+
+  const pillarsWithCells = [...perPillar].filter((c) => c > 0).length;
+  return {
+    blocked,
+    notWalkable,
+    unattributed,
+    firstUnattributed,
+    perPillar: [...perPillar],
+    pillarCount: pillars.length,
+    pillarRadius: pillars.length ? pillars[0].radius : 0,
+    stampRadius: (pillars.length ? pillars[0].radius : 0) + RASTER.DILATION,
+    pillarsWithCells,
+    // D-91's ASSERTED clause.
+    intentOk: unattributed === 0 && pillarsWithCells === pillars.length && pillars.length === 6,
+    // D-91's REPORTED clause.
+    literalOk: Math.abs(blocked - I7_LITERAL) <= I7_LITERAL_BAND,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // One layout, measured end to end
 // ---------------------------------------------------------------------------
 // Everything below reads off a world that has ALREADY been through
@@ -658,6 +858,7 @@ function evaluateLayout(world, nav, plan, worldSeed, runIndex) {
   const footprints = world.staticFootprints;
   const bounds = { minX: zone.boundsMinX, maxX: zone.boundsMaxX, minZ: zone.boundsMinZ, maxZ: zone.boundsMaxZ };
   const isWastes = plan.id === 'ashen_wastes';
+  const isAltar = plan.id === 'altar_of_instruction';
 
   const entryPoint = world.entry(plan.entryTag);
   const entryRegion = nav.regionAt(entryPoint.x, entryPoint.z);
@@ -784,6 +985,15 @@ function evaluateLayout(world, nav, plan, worldSeed, runIndex) {
     };
   }
 
+  // --- I5 / I7 — altar only, per §7.1's "Applies to: altar" ----------------
+  // `world._altarLayout` is the layout object `enterZone` itself built and
+  // kept; it is `null` for every other zone. If WRLD-8 is ever unshipped this
+  // reads `null` and the rows come back as SKIPs rather than as silence.
+  if (isAltar && world._altarLayout) {
+    out.i5 = checkI5(nav, world._altarLayout, entryRegion);
+    out.i7 = checkI7(grid, world._altarLayout);
+  }
+
   // --- I6 — no destructible can seal a region ------------------------------
   out.i6 = checkI6(grid, zone, footprints);
 
@@ -808,6 +1018,14 @@ function evaluateLayout(world, nav, plan, worldSeed, runIndex) {
       total: d.props.length + b.ridgeWall.length + b.silhouette.length,
       budget: descriptor.propBudget,
     };
+  } else if (plan.id === 'altar_of_instruction') {
+    // The Altar has no procedural layout to score: `07` §5 says in as many
+    // words "the layout is fixed. The seed drives only the dressing", so
+    // `rooms` (D-82) and the connected-cell spread (D-77) have no meaning
+    // here and there is no `_bonereachLayout` to read. Saying so beats
+    // falling into the Bonereach branch, which is what this file did before
+    // WRLD-8 landed and `built` started being resolved from disk.
+    out.fixedLayout = true;
   } else {
     const L = world._bonereachLayout;
     out.rooms = { achieved: L.rooms.length, target: L.targetRooms, requested: L.targetRoomsRequested }; // D-82
@@ -936,6 +1154,29 @@ function buildZoneChecks(zoneId, results, checks) {
       ]));
   }
 
+  // --- I5 (altar only) -----------------------------------------------------
+  if (results[0] && results[0].i5) {
+    const i5Bad = results.filter((r) => !r.i5.ok);
+    const bossBad = results.filter((r) => !r.i5.bossOk);
+    const padBad = results.filter((r) => !r.i5.padOk);
+    const anchorBad = results.filter((r) => r.i5.badAnchors.length > 0);
+    const anchorsTotal = results.reduce((a, r) => a + r.i5.anchorCount, 0);
+    const anchorsBadTotal = results.reduce((a, r) => a + r.i5.badAnchors.length, 0);
+    const offRegion = results.reduce((a, r) => a + r.i5.anchorsOffRegion, 0);
+    const driftedBossStart = results.filter((r) => !r.i5.bossStartIsSpecLiteral).length;
+    const s = results[0].i5;
+    checks.push(makeCheck('I5', 'fail', zoneId, i5Bad.length === 0 ? 'pass' : 'fail',
+      `boss reachable + arena intact ${n - i5Bad.length}/${n} (${s.teleportCount} teleport + ${s.summonCount} summon anchors walkable: ${anchorsTotal - anchorsBadTotal}/${anchorsTotal})`,
+      [
+        `07 §7.1: regionAt(0, +5) === regionAt(entry) — held on ${n - bossBad.length}/${n}; the boss start world._altarLayout published is (${s.bossX.toFixed(2)}, ${s.bossZ.toFixed(2)}), regionAt = ${s.bossRegion}, entryRegion = ${results[0].entryRegion}`,
+        `exit portal pad (${s.padX.toFixed(2)}, ${s.padZ.toFixed(2)}) in the entry region — held on ${n - padBad.length}/${n}`,
+        `all ${s.anchorCount} anchors walkable (nav.walkable off the live grid) — held on ${n - anchorBad.length}/${n} layouts`,
+        `MEASURED beside the assertion: anchors NOT in the entry region = ${offRegion}/${anchorsTotal}. §7.1 only asks that the anchors be walkable, so this is printed, not asserted.`,
+        ...(driftedBossStart > 0 ? [`WARNING: on ${driftedBossStart}/${n} layouts the published boss start is not §5.2's literal (0, +5.0)`] : []),
+        ...listing(i5Bad, (r) => `${label(r)}  bossRegion=${r.i5.bossRegion} padRegion=${r.i5.padRegion} entryRegion=${r.entryRegion}  ${r.i5.badAnchors.map((a) => `${a.kind}[${a.index}]@(${a.x.toFixed(2)},${a.z.toFixed(2)}) r=${a.radius} ${a.angleDeg}deg walkable=${a.walkable} region=${a.region}`).join('  ')}`),
+      ]));
+  }
+
   // --- I6 ------------------------------------------------------------------
   const anyDestructible = results.some((r) => r.i6.destructibles > 0);
   const sealed = results.filter((r) => r.i6.sealed);
@@ -951,6 +1192,41 @@ function buildZoneChecks(zoneId, results, checks) {
         'READING (see this file\'s header): every destructible already carries blocksNav:true, so §7.1\'s literal "re-run N7 with every destructible stamped blocked" is a no-op that cannot fail. Measured instead: rasterizeNav WITHOUT the destructibles, asserting regionCount does not drop.',
         ...listing(sealed, (r) => `${label(r)}  regionCount with=${r.i6.regionCountWith} without=${r.i6.regionCountWithout} destructibles=${r.i6.destructibles}`),
         ...listing(onDoorway, (r) => `${label(r)}  ${r.i6.onDoorway} destructible(s) on a doorway cell, first at (${r.i6.firstDoorway.x.toFixed(2)}, ${r.i6.firstDoorway.z.toFixed(2)})`),
+      ]));
+  }
+
+  // --- I7 (altar only, ruling D-91) ----------------------------------------
+  if (results[0] && results[0].i7) {
+    const intentBad = results.filter((r) => !r.i7.intentOk);
+    const literalBad = results.filter((r) => !r.i7.literalOk);
+    const unattributed = results.reduce((a, r) => a + r.i7.unattributed, 0);
+    const counts = new Map();
+    for (const r of results) counts.set(r.i7.blocked, (counts.get(r.i7.blocked) || 0) + 1);
+    const keys = [...counts.keys()].sort((a, b) => a - b);
+    const nwCounts = new Set(results.map((r) => r.i7.notWalkable));
+    const s = results[0].i7;
+    const firstBadCell = (results.find((r) => r.i7.firstUnattributed) || { i7: {} }).i7.firstUnattributed;
+
+    checks.push(makeCheck('I7', 'fail', zoneId, intentBad.length === 0 ? 'pass' : 'fail',
+      `arena floor open — only the six pillars block inside r = ${I7_RADIUS.toFixed(1)} m, on ${n - intentBad.length}/${n}`,
+      [
+        `ASSERTED (D-91, the INTENT): §5.4 E4's own sentence — "the only blockers inside r = 17.0 m are the six pillars". Every blocked cell inside the disc is attributed by re-applying passN4FootprintStamp's own predicate: cell centre within pillar.radius + RASTER.DILATION = ${s.pillarRadius.toFixed(2)} + ${RASTER.DILATION.toFixed(2)} = ${s.stampRadius.toFixed(2)} m.`,
+        `unattributable blocked cells across ${n} layouts: ${unattributed}${firstBadCell ? ` (first at (${firstBadCell.x.toFixed(2)}, ${firstBadCell.z.toFixed(2)}))` : ''}`,
+        `all ${s.pillarCount} pillars actually contribute cells on ${results.filter((r) => r.i7.pillarsWithCells === r.i7.pillarCount).length}/${n} — per-pillar counts on the first layout: ${s.perPillar.join(' ')}`,
+        `E4's 96 arena rubble props are all navBlock:false, and the sweep confirms it: nothing but the pillars is blocked inside the disc.`,
+        `cells inside the disc that are not walkable: ${[...nwCounts].sort((a, b) => a - b).join('/')} (raster.js documents a third state — neither walkable nor blocked — so the two are counted separately, and here they agree)`,
+        ...listing(intentBad, (r) => `${label(r)}  blocked=${r.i7.blocked} unattributed=${r.i7.unattributed} pillarsWithCells=${r.i7.pillarsWithCells}/${r.i7.pillarCount}`),
+      ]));
+
+    // D-91 — the literal band, measured and carried, never asserted.
+    checks.push(makeCheck('I7-LITERAL', 'note', zoneId, literalBad.length === 0 ? 'pass' : 'note',
+      `07 §7.1's literal "blocked cells inside r = 16.0 m = ${I7_LITERAL} +- ${I7_LITERAL_BAND}" holds on ${n - literalBad.length}/${n} — MEASURED ${keys.length === 1 ? keys[0] : `[${keys[0]}..${keys[keys.length - 1]}]`}`,
+      [
+        `histogram of blocked cells inside r = ${I7_RADIUS.toFixed(1)} m: ${keys.map((k) => `${k}:${counts.get(k)}`).join(' ')}`,
+        `D-91: ${I7_LITERAL} is an AREA estimate — §5.4 derives it as 6 x ceil(pi * (0.9 + 0.3)^2 / 0.25) = 6 x 19. passN4FootprintStamp does not integrate area: it blocks a cell when the cell CENTRE falls within radius + dilation (0.90 + 0.30 = 1.20 m).`,
+        `Cell-centre sampling of a r = 1.20 m disc yields 16..21 cells depending on how the centre sits on the lattice. The six pillar bearings §5.2 mandates (r = 11.5 m at 0/60/120/180/240/300 degrees) all land in the 16-cell alignment on a grid whose cell centres are the odd multiples of 0.25 m, so the count is 6 x 16 = 96 on every layout, deterministically.`,
+        `Shortfall against the literal: ${I7_LITERAL - keys[0]} cells (${I7_LITERAL} - ${keys[0]}); the measured count is ${(keys[0] / I7_LITERAL * 100).toFixed(1)} % of the spec's number, and ${I7_LITERAL - I7_LITERAL_BAND} is the bottom of the band. Closing it needs a different pillar radius, a different dilation or different bearings — none of which this tool may invent, and all three are 07 §5.2/§6.3 numbers.`,
+        `The INTENT clause above IS asserted and holds; only this literal is reported. Never asserted (the shipped geometry cannot produce it), never silently dropped (O-58).`,
       ]));
   }
 
@@ -975,6 +1251,22 @@ function buildZoneChecks(zoneId, results, checks) {
       i8SightLine,
       `D-83's own remedy (exclude NAV_FLAG.interior cells) is currently a NO-OP: interior-flagged walkable cells = ${i8Interior} (violating: ${i8InteriorBad}). nav.rebuild() passes groundRegions:null, so nothing is ever flagged interior.`,
       worst ? `worst offender: cell (${worst.px.toFixed(2)}, ${worst.pz.toFixed(2)}) sees a solid topY ${worst.solidTopY.toFixed(2)} m with north face z1 ${worst.solidZ1.toFixed(2)}; allowed ${worst.allowed.toFixed(2)} m, over by ${worst.over.toFixed(2)} m` : '',
+    ].filter(Boolean)));
+  } else if (zoneId === 'altar_of_instruction') {
+    // D-90 — the occlusion here is DESIGNED, and `07` §5.3's guarantee G6
+    // says so in as many words. Same treatment as Bonereach under D-83:
+    // honest measurement, threshold untouched, loud counted NOTE.
+    checks.push(makeCheck('I8', 'note', zoneId, 'note', i8Detail, [
+      'D-90: 07 §5.3 G6 ("Cover and line of sight") ACCEPTS this occlusion rather than forbidding it.',
+      'G6, verbatim: the six pillars are "0.90 m radius, 7.0 m tall, at radius 11.5 m. Against the Occlusion Plane at s = 0 they are far over 1.00 m, so a pillar *does* occlude a player standing immediately north of it. That is accepted and deliberate."',
+      'G6 sizes the band itself: s <= (7.0 - 1.0) / 1.206 = 4.98 m north of each pillar, "a 1.8 x 5.0 m rectangle, six of them, 53.9 m2 total = 5.9 % of the arena", and marks each one on the floor with an authored scorched fan decal so the trade is legible.',
+      'Standing in the occluded band is the player\'s own choice — G6 calls it "the only place the player is safe from a ranged phase-III meteor lock". Cover that does not occlude is not cover.',
+      `MEASURED violating fraction: ${pct(i8Bad, i8Cells)} of walkable cells (${i8Bad} of ${i8Cells}) across ${n} layouts`,
+      `G6's own 5.9 % is the ARENA's share; the fraction above is over the whole zone's walkable set (arena disc + approach corridor + alcove), and it counts the rim, the gate arch and the altar block as well as the six pillars — every static solid, which is what I8 says.`,
+      i8SightLine,
+      `interior-flagged walkable cells: ${i8Interior} (violating: ${i8InteriorBad}); nav.rebuild() passes groundRegions:null, so nothing is ever flagged interior through the real pipeline — 07 §5.2 asks for the arena floor to be walkable+interior and it is not.`,
+      worst ? `worst offender: cell (${worst.px.toFixed(2)}, ${worst.pz.toFixed(2)}) sees a solid topY ${worst.solidTopY.toFixed(2)} m with north face z1 ${worst.solidZ1.toFixed(2)}; allowed ${worst.allowed.toFixed(2)} m, over by ${worst.over.toFixed(2)} m` : '',
+      'Threshold untouched, nothing excluded, and this row never moves the exit code. The wastes I8 stays a FAIL — nothing in 07 licenses that one.',
     ].filter(Boolean)));
   } else {
     checks.push(makeCheck('I8', 'fail', zoneId, i8Bad === 0 ? 'pass' : 'fail', i8Detail, [
@@ -1145,8 +1437,8 @@ function renderHuman(report, verbose) {
   const L = [];
   L.push(`mapgen  zones=[${report.zones.join(', ')}]  seeds=${report.seeds}  runIndex=0..${report.runs - 1}  sweep=${report.layoutsSweep}  +fixtures=${report.layoutsFixtures}  total=${report.layouts}`);
   L.push(`        evaluated ${report.layouts} layouts (${report.layoutsSweep} sweep + ${report.layoutsFixtures} fixture regenerations for 12.D02). 12 §5.5 names 5400 = 3 zones x 200 seeds x 3 runIndex x 3 difficulty tiers.`);
-  L.push(`        3 x 200 x 3 = 1800, not 5400: the missing factor is the tier sweep, and NO difficulty-tier system exists (AI-11 / M6, finding O-97).`);
-  L.push(`        Of the 3 zones, altar_of_instruction has no generator (src/world/gen/altar.js — WRLD-8 not built), so 1800 -> 1200.`);
+  L.push(`        ${ZONE_PLAN.length} x 200 x 3 = ${ZONE_PLAN.length * 200 * 3}, not 5400: the missing factor is the tier sweep, and NO difficulty-tier system exists (AI-11 / M6, finding O-97).`);
+  L.push(`        ${report.accounting}`);
   L.push(`        Every number below came from: world.setWorldSeed(s) -> await world.enterZone(zone, tag, {runIndex}) -> nav.grid / world.* (O-106).`);
   L.push('');
 
@@ -1163,7 +1455,11 @@ function renderHuman(report, verbose) {
     L.push('');
   }
 
-  const global = report.checks.filter((c) => c.scope === 'run' || c.scope === 'altar_of_instruction');
+  // Anything not scoped to a zone that was actually swept. That is `run`-wide
+  // rows plus, when a generator is missing from disk, that zone's SKIPs — the
+  // old spelling special-cased `altar_of_instruction` by name and printed the
+  // whole altar block a second time the moment WRLD-8 landed.
+  const global = report.checks.filter((c) => !report.zones.includes(c.scope));
   if (global.length) {
     L.push('run-wide');
     for (const c of global) {
@@ -1206,6 +1502,18 @@ async function main() {
   const plans = ZONE_PLAN.filter((p) => requested.includes(p.id));
   const builtPlans = plans.filter((p) => p.built);
 
+  // --- the accounting line, DERIVED — never a literal ----------------------
+  // It reads the same `zoneIsBuilt()` result `ZONE_PLAN` does, so it cannot
+  // disagree with what was actually swept. The first cut of this file printed
+  // "altar_of_instruction has no generator … so 1800 -> 1200" as a fixed
+  // string and kept printing it after WRLD-8 landed.
+  const unbuiltAll = ZONE_PLAN.filter((p) => !p.built);
+  const fullSweep = ZONE_PLAN.length * DEFAULT_SEED_COUNT * DEFAULT_RUN_COUNT;
+  const builtSweep = ZONE_PLAN.filter((p) => p.built).length * DEFAULT_SEED_COUNT * DEFAULT_RUN_COUNT;
+  const accounting = unbuiltAll.length === 0
+    ? `All ${ZONE_PLAN.length} zones have a generator on disk (zoneIsBuilt() over ZONE_GENERATOR_FILES), so the full ${fullSweep} is reachable; this run swept ${builtPlans.length} zone(s) x ${args.seeds} seeds x ${args.runs} runIndex.`
+    : `Of the ${ZONE_PLAN.length} zones, ${unbuiltAll.map((p) => `${p.id} (${ZONE_GENERATOR_FILES[p.id].join(', ')})`).join('; ')} has no generator on disk, so ${fullSweep} -> ${builtSweep}; this run swept ${builtPlans.length} zone(s) x ${args.seeds} seeds x ${args.runs} runIndex.`;
+
   const checks = [];
   const perZone = {};
   const runHash = newHash();
@@ -1214,12 +1522,13 @@ async function main() {
 
   // --- the unbuilt zone: loud, counted SKIPs, never quietly dropped --------
   for (const p of plans.filter((z) => !z.built)) {
-    for (const id of ['I1', 'I2', 'I3', 'I5', 'I7', 'I8']) {
+    const ids = p.id === 'altar_of_instruction' ? ['I1', 'I2', 'I3', 'I5', 'I7', 'I8'] : ['I1', 'I2', 'I3', 'I8'];
+    for (const id of ids) {
       checks.push(makeCheck(id, 'skip', p.id, 'skip',
-        `SKIP — ${p.generator}`,
+        `SKIP — ${p.generator} is not on disk (${ZONE_GENERATOR_FILES[p.id].join(', ')})`,
         [
           `07 §7.1 lists ${id} as applying to this zone; there is no generator to run it against.`,
-          'world.enterZone(\'altar_of_instruction\', …) falls through to buildBoundaryFootprints (WRLD-1\'s four placeholder perimeter walls): no rooms, no arena, no teleport/summon anchors, no packs, no chests.',
+          `world.enterZone('${p.id}', …) falls through to buildBoundaryFootprints (WRLD-1's four placeholder perimeter walls): no rooms, no arena, no teleport/summon anchors, no packs, no chests.`,
           id === 'I5' ? 'I5 needs the boss arena, the exit portal pad, 12 teleport anchors and 8 summon anchors. None exist.' : '',
           id === 'I7' ? 'I7 needs the arena floor (blocked cells within r = 16.0 m of the Altar centre = 114 +- 6). No arena exists.' : '',
           'Reported as a SKIP, not a pass (O-58: a coverage list that quietly loses a member reads as full while it is not).',
@@ -1278,8 +1587,9 @@ async function main() {
       `07 §7.4's golden layout hashes cannot be compared — tests/fixtures/mapgen/hashes.json does not exist`,
       [
         '12 §6 lists `mapgen/ hashes.json  11 layout hashes` as a required fixture. It has never been blessed.',
+        `That count is 07 §7.4's ELEVEN pinned seeds; the pinned set expands to ${pinned.length} layout hashes because 0x00000001 is pinned for every zone and ${builtPlans.length} zones are built. When WRLD-8 landed src/world/gen/altar.js the set grew from 12 to 13 — the altar's own 0x00000001 row below.`,
         'This ticket\'s file grant is tools/mapgen.mjs and tests/tools/mapgen.test.js only, so it cannot create it.',
-        'The 11 hashes measured this run are printed under 12.D02 above and are ready to be blessed by whoever owns tests/fixtures/.',
+        `The ${hashes.length} hashes measured this run are printed under 12.D02 above and are ready to be blessed by whoever owns tests/fixtures/.`,
         ...hashes.map((h) => `${h.seed}  ${h.zone.padEnd(14)} ${h.hash}  (${h.exercises})`),
       ]));
   }
@@ -1298,8 +1608,14 @@ async function main() {
     layoutsSweep: layouts,
     layoutsFixtures: fixtureLayouts,
     layoutsSpecClaims: 5400,
-    layoutsSpecArithmetic: 1800,
-    layoutsUnreachableReason: 'no difficulty-tier system exists (AI-11 / M6, O-97) and src/world/gen/altar.js (WRLD-8) is not built',
+    layoutsSpecArithmetic: fullSweep,
+    layoutsBuiltZones: builtSweep,
+    zonesUnbuilt: unbuiltAll.map((p) => p.id),
+    accounting,
+    layoutsUnreachableReason: [
+      'no difficulty-tier system exists (AI-11 / M6, O-97), so 5400 -> 1800',
+      ...(unbuiltAll.length ? [`${unbuiltAll.map((p) => p.id).join(', ')} has no generator on disk, so ${fullSweep} -> ${builtSweep}`] : []),
+    ].join('; '),
     pipeline: 'world.setWorldSeed(seed) -> await world.enterZone(zoneId, entryTag, {runIndex}) -> nav.grid / world.entry / world.current.chests / world.packs / world.spawnPoints / world._spawnReport / world.staticFootprints',
     layoutHash: hashHex(runHash),
     perZone,

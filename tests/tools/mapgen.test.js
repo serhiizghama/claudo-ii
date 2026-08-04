@@ -5,17 +5,20 @@
 // `balance.mjs`: `spawnSync`, asserting on exit code and output — this file
 // is a CLI, not a module to `import`.
 //
-// Deliberately THIN. It does NOT re-run the 1 200-layout sweep in-process
+// Deliberately THIN. It does NOT re-run the 1 800-layout sweep in-process
 // (that run is executed and reported by hand, see this ticket's report) — a
 // `node --test` run must stay fast, so every case here uses a tiny
 // `--seeds`/`--runs` slice. What it checks: the CLI parses its `=`-form
 // flags, `--json` emits a well-formed report off the same `checks[]` the
 // human report renders, the exit code is MEANINGFUL, the rulings that scope
-// the invariants (D-83's Bonereach NOTE, D-84's FLOOR-CLAMPED list, WRLD-8's
-// SKIPs) cannot be silently rolled back into fake passes, and `12.D02`'s own
-// promise — two runs at one seed, identical layout hashes — holds, verified
-// with an explicit SHA-256 comparison of both the tool's own reported
-// `layoutHash` and the full JSON body.
+// the invariants (D-83's Bonereach NOTE, D-84's FLOOR-CLAMPED list, D-90's
+// altar `I8` NOTE, D-91's `I7` literal) cannot be silently rolled back into
+// fake passes, the altar's `I5`/`I7` are REAL verdicts now that WRLD-8 has
+// landed rather than the stubs they were, the accounting line is derived
+// from `zoneIsBuilt()` and not from a literal, and `12.D02`'s own promise —
+// two runs at one seed, identical layout hashes — holds, verified with an
+// explicit SHA-256 comparison of both the tool's own reported `layoutHash`
+// and the full JSON body.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -103,16 +106,38 @@ test('mapgen.mjs --json emits a well-formed report off one flat checks[] array',
 
 test('mapgen.mjs prints the layout count it actually evaluated, and never claims the spec\'s 5400', () => {
   const { report } = jsonRun(SLICE);
-  const expected = 2 /* built zones */ * 4 /* seeds */ * 1 /* runs */;
+  const expected = report.zones.length * 4 /* seeds */ * 1 /* runs */;
   assert.equal(report.layouts, expected, 'the reported count must be the count actually run');
   assert.equal(report.layoutsSpecClaims, 5400);
   assert.equal(report.layoutsSpecArithmetic, 1800);
-  assert.match(report.layoutsUnreachableReason, /AI-11|WRLD-8/);
+  assert.match(report.layoutsUnreachableReason, /AI-11/);
 
   const human = run(SLICE);
-  assert.match(human.stdout, /layouts evaluated: 8\b/);
+  assert.match(human.stdout, new RegExp(`layouts evaluated: ${expected}\\b`));
   assert.match(human.stdout, /5400/);
   assert.match(human.stdout, /1800/);
+});
+
+test('the accounting line is DERIVED from zoneIsBuilt(), so it can never disagree with what was swept', () => {
+  const { report } = jsonRun(SLICE);
+  // Every zone with a generator on disk must have been swept, and the
+  // accounting must name exactly the ones that were not.
+  assert.deepEqual(report.zonesUnbuilt, [], 'all three generators are on disk in this tree');
+  assert.equal(report.layoutsBuiltZones, report.layoutsSpecArithmetic,
+    'with no unbuilt zone the built-zone product must equal the full 3 x 200 x 3');
+  assert.ok(report.zones.includes('altar_of_instruction'),
+    'WRLD-8 landed src/world/gen/altar.js; the altar must be swept, not skipped');
+  assert.doesNotMatch(report.accounting, /not built|no generator/,
+    `the accounting line still claims a zone is missing: ${report.accounting}`);
+
+  const human = run(SLICE);
+  assert.match(human.stdout, /All 3 zones have a generator on disk/);
+  assert.doesNotMatch(human.stdout, /WRLD-8 not built/);
+
+  // And the altar block must be rendered ONCE, not once per zone and again
+  // under run-wide (which is what the old scope filter did).
+  const altarHeadings = human.stdout.split('\n').filter((l) => /^altar_of_instruction\s+\d+ layouts/.test(l));
+  assert.equal(altarHeadings.length, 1, 'the altar zone block must be printed exactly once');
 });
 
 test('mapgen.mjs names the exact call chain each number came from (O-106)', () => {
@@ -141,21 +166,78 @@ test('I1-I9 are all accounted for — every invariant is present as a verdict or
   }
 });
 
-test('WRLD-8 — I5/I7 and the altar third of I1/I2/I3 are loud SKIPs naming the missing generator, never fake passes', () => {
+test('I5 is a REAL verdict on the altar — boss start, exit portal pad and all 20 anchors, off the live grid', () => {
   const { report } = jsonRun(SLICE);
-  const altar = report.checks.filter((c) => c.scope === 'altar_of_instruction');
-  assert.ok(altar.length > 0, 'the unbuilt zone must still appear in the report');
-  assert.ok(altar.every((c) => c.status === 'skip'), 'every altar row must be a skip, never a pass');
-  for (const id of ['I1', 'I2', 'I3', 'I5', 'I7']) {
-    const row = altar.find((c) => c.id === id);
-    assert.ok(row, `${id} must be present for altar_of_instruction`);
-    assert.match(row.detail + row.lines.join(' '), /WRLD-8/, `${id}'s skip must name WRLD-8`);
-    assert.match(row.detail + row.lines.join(' '), /altar\.js/, `${id}'s skip must name the missing file`);
-  }
-  // I5/I7 exist nowhere else — they are altar-only per 07 §7.1's "Applies to".
-  for (const id of ['I5', 'I7']) {
-    assert.ok(report.checks.filter((c) => c.id === id).every((c) => c.scope === 'altar_of_instruction' && c.status === 'skip'));
-  }
+  const i5 = report.checks.filter((c) => c.id === 'I5');
+  assert.equal(i5.length, 1, 'I5 is altar-only per 07 §7.1\'s "Applies to" column');
+  const row = i5[0];
+  assert.equal(row.scope, 'altar_of_instruction');
+  assert.equal(row.severity, 'fail', 'I5 is a red gate, not a note — nothing scopes it away');
+  assert.notEqual(row.status, 'skip', 'WRLD-8 has landed; I5 must be measured, not skipped');
+  assert.equal(row.status, 'pass', `I5 must hold: ${row.lines.join(' | ')}`);
+
+  // 07 §7.1's three clauses must each be visible with their own count, and
+  // the anchor tables must be the spec's 12 + 8, not whatever was found.
+  assert.match(row.detail, /12 teleport \+ 8 summon anchors walkable/);
+  const text = row.detail + ' ' + row.lines.join(' ');
+  assert.match(text, /regionAt\(0, \+5\)/, 'the boss-start clause must be stated as §7.1 writes it');
+  assert.match(text, /exit portal pad \(0\.00, -13\.00\)/, 'the pad clause must carry the measured position');
+  assert.match(text, /nav\.walkable/, 'O-106: the row must name the call the walkability came from');
+  assert.match(text, /world\._altarLayout/, 'O-106: the anchors must come off the published layout');
+
+  // Not vacuous: 4 seeds x 1 run x 20 anchors.
+  assert.match(row.detail, /: (\d+)\/(\d+)\)/);
+  const [, ok, total] = row.detail.match(/: (\d+)\/(\d+)\)/);
+  assert.equal(Number(total), report.perZone.altar_of_instruction.layouts * 20);
+  assert.equal(Number(ok), Number(total));
+});
+
+test('D-91 — I7 asserts the INTENT and carries the unreachable 114 +- 6 literal as a counted NOTE with the measured number', () => {
+  const { report } = jsonRun(SLICE);
+  const i7 = report.checks.filter((c) => c.id === 'I7');
+  assert.equal(i7.length, 1, 'I7 is altar-only per 07 §7.1\'s "Applies to" column');
+  assert.equal(i7[0].scope, 'altar_of_instruction');
+  assert.equal(i7[0].severity, 'fail', 'the INTENT clause IS a red gate');
+  assert.equal(i7[0].status, 'pass', `I7's intent must hold: ${i7[0].lines.join(' | ')}`);
+  const text = i7[0].detail + ' ' + i7[0].lines.join(' ');
+  assert.match(text, /only the six pillars block inside r = 16\.0 m/);
+  assert.match(text, /unattributable blocked cells across \d+ layouts: 0/);
+  assert.match(text, /passN4FootprintStamp/, 'attribution must re-apply the shipped stamp rule, not a lookalike');
+  assert.match(text, /all 6 pillars actually contribute cells/, 'a pillarless arena must not pass trivially');
+
+  // The literal is reported separately, never asserted, never dropped.
+  const lit = report.checks.find((c) => c.id === 'I7-LITERAL');
+  assert.ok(lit, 'D-91: the literal band must not vanish just because it is unreachable');
+  assert.equal(lit.severity, 'note', 'a number the shipped geometry cannot produce is never a gate');
+  assert.equal(lit.scope, 'altar_of_instruction');
+  assert.match(lit.detail, /114 \+- 6/, 'the note must quote the spec band it is failing');
+  assert.match(lit.detail, /MEASURED 96\b/, 'WRLD-8 measured 96 blocked cells; the note must carry that number');
+  assert.ok(lit.lines.some((l) => l.startsWith('histogram of blocked cells')), 'the measured distribution must be printed');
+  assert.ok(lit.lines.some((l) => /6 x ceil/.test(l)), 'the note must carry the arithmetic, not just a verdict');
+  assert.ok(lit.lines.some((l) => /Shortfall against the literal: 18 cells/.test(l)));
+});
+
+test('D-90 — I8 on the altar is a counted NOTE citing G6, and the wastes I8 stays a FAIL', () => {
+  const { report } = jsonRun(SLICE);
+  const altar = report.checks.find((c) => c.id === 'I8' && c.scope === 'altar_of_instruction');
+  assert.ok(altar, 'I8 must actually run on the altar, not be dropped');
+  assert.equal(altar.severity, 'note', 'D-90: the altar I8 is a NOTE, so it never flips the exit code');
+  assert.equal(altar.status, 'note');
+  const text = altar.detail + ' ' + altar.lines.join(' ');
+  assert.match(text, /D-90/);
+  assert.match(text, /G6/, 'the note must cite 07 §5.3 G6, the guarantee that accepts the occlusion');
+  assert.match(text, /accepted and deliberate/, 'G6\'s own words are the licence; quote them');
+  assert.match(text, /MEASURED violating fraction/, 'honest measurement, not a shrug');
+  assert.match(text, /\d+\.\d+ %/, 'the measured fraction must be a number');
+  assert.match(altar.detail, /walkable cells/);
+
+  // The threshold is untouched: the row still finds violating cells.
+  assert.doesNotMatch(text, /threshold .*(raised|widened|relaxed)/i);
+
+  // Nothing about D-90 leaks onto the wastes.
+  const wastes = report.checks.find((c) => c.id === 'I8' && c.scope === 'ashen_wastes');
+  assert.ok(wastes);
+  assert.equal(wastes.severity, 'fail', 'the wastes I8 is a normal red gate; nothing licenses that one');
 });
 
 test('D-83 — I8 runs on every zone; Bonereach is a counted NOTE carrying the measured violating fraction, never a silent pass or a weakened threshold', () => {
@@ -234,7 +316,7 @@ test('NOTE and SKIP findings are counted and printed loudly, and never change th
   assert.match(human.stdout, /\d+ pass · \d+ fail · \d+ warn · \d+ notes · \d+ skip/);
 });
 
-test('mapgen.mjs --zone=bonereach runs one zone and still reports the altar SKIPs when asked for all', () => {
+test('mapgen.mjs --zone=bonereach sweeps exactly that zone and rejects an unknown one with exit 2', () => {
   const { report } = jsonRun(['--zone=bonereach', '--seeds=2', '--runs=1', '--no-fixtures']);
   assert.deepEqual(report.zones, ['bonereach']);
   assert.equal(report.layouts, 2);
