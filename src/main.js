@@ -125,6 +125,7 @@ import { SkillsSystem } from './skills/index.js';
 import { UiSystem } from './ui/index.js';
 import { ItemsSystem } from './items/index.js';
 import { SaveSystem } from './save/index.js';
+import { AiSystem } from './ai/index.js';
 
 /** `11-flows.md` §1 B13: the frame count, not a rAF race, raises `__READY__`. */
 const BOOT_FRAMES = 3;
@@ -454,6 +455,14 @@ export async function boot(opts = {}) {
   registry.add(UiSystem);
   registry.add(ItemsSystem);
   registry.add(SaveSystem);
+  // O-112, closed here by the lead: `ai` had been built through eight M5
+  // tickets and was registered nowhere, so nothing under `src/ai/` ran in the
+  // real application — `dense_combat` framed an empty zone, the corridor check
+  // had no crowd to check, and M4's gate item ⑧ had no monsters to clear. It
+  // is two lines, exactly as this block promises, and `Registry.resolve()`
+  // topo-sorts on `AiSystem.deps` (`['actors','nav','combat','world']`), so
+  // the position in this list is not what orders it.
+  registry.add(AiSystem);
   // Next one goes directly below this line, same two-line shape. This
   // block's line count is therefore not fixed — see this file's "What
   // doesn't exist yet" header for why nothing may assert a literal total

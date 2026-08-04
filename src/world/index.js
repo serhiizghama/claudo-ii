@@ -260,6 +260,33 @@ import {
 // THIS zone's real walkable/region data), and only for the two zones with a
 // real generator (`isWastes`/`isBonereach` — rule 11, no other exists yet).
 import { planWastesSpawns, planBonereachSpawns } from './spawn.js';
+// WRLD-10 — `07` §10 (transitions, retention, the town portal). Same
+// "index.js: thin forward, the real logic lives in its own file" shape as
+// `./zone.js` above (D-66): every method added to `WorldSystem` below
+// forwards straight into `./transition.js`, and `enterZone` gains exactly
+// five call sites into it (retained lookup, chest normalisation,
+// interactable build, T13a restore, T13b restore). See that file's header
+// for the retention key, the T12/T13 ordering deviation and the clock.
+import {
+  createTransitionState,
+  retainOnTeardown,
+  retainedFor,
+  applyRetainedState,
+  finishZoneRestore,
+  normalizeChests,
+  buildInteractables,
+  interactableAt as interactableAtImpl,
+  setExitSealed as setExitSealedImpl,
+  openChest as openChestImpl,
+  openPortal as openPortalImpl,
+  closePortal as closePortalImpl,
+  portalAt as portalAtImpl,
+  usePortal as usePortalImpl,
+  onActorDeath as onActorDeathImpl,
+  beginTransition as beginTransitionImpl,
+  advanceTransition as advanceTransitionImpl,
+  TRANSITION_MS,
+} from './transition.js';
 
 /** WRLD-4 round 2 (`07` §1.3) — the honest current terrace set: ONE
  * terrace, boundless (`bounds` omitted, so it covers the whole zone),
@@ -514,6 +541,25 @@ export class WorldSystem {
      * `_wastesLayout`/`_bonereachLayout` above. */
     this._altarLayout = null;
     this._altarDressing = null;
+
+    /** WRLD-10 — the transition/retention/portal state, built ONCE here
+     * (rule 6; every `Alloc: no` row in `02-api-contracts.md` §5 that this
+     * ticket implements writes into a scratch that lives on it). See
+     * `./transition.js`. */
+    this._transition = createTransitionState();
+
+    /** WRLD-10 — the CURRENT zone's T6 layout products, kept so that a
+     * retained re-entry can skip the generator entirely (`07` §10.4: "skips
+     * T6 entirely, re-runs T7-T9 from the same seed"). Replaced wholesale at
+     * the end of every `enterZone`, never mutated. */
+    this._genOfCurrent = null;
+
+    /** WRLD-10 — `applyRetainedState`'s own report for the current zone
+     * (`null` on a cold entry). Report/test-only. */
+    this._retainReport = null;
+
+    /** WRLD-10 — bound once so `dispose()` can unsubscribe it (rule 7). */
+    this._onActorDeath = (payload) => onActorDeathImpl(this._transition, this, payload);
   }
 
   /** @param {object} ctx */
@@ -522,6 +568,8 @@ export class WorldSystem {
     this._physics = (typeof ctx.peek === 'function' && ctx.peek('physics')) || null;
     // No `ctx.rng.fork()` here — see the file header, "Determinism — no
     // ctx.rng.fork() in THIS ticket, on purpose".
+    // WRLD-10 — `02-api-contracts.md` §5's own `Listens: actor:death` row.
+    ctx.events.on('actor:death', this._onActorDeath);
   }
 
   /** `02-api-contracts.md` §5: `setWorldSeed(seed) => void` — from the
@@ -656,7 +704,15 @@ export class WorldSystem {
   entry(entryTag, out) {
     const inst = this._current;
     if (!inst) throw new Error('world.entry: no zone is currently loaded');
-    if (!inst.descriptor.entryTags.includes(entryTag)) {
+    // WRLD-10 widens this check by exactly one clause, and only in the
+    // permissive direction: an entry `openPortal` REGISTERED at runtime on
+    // this instance (`portal_return`, `07` §10.5 step 2) is accepted even
+    // though no shipped `descriptor.entryTags` declares it. Without this the
+    // town portal's own return leg — `enterZone(field, 'portal_return')` —
+    // could never place the player, because `07` §10.5's tag is not in
+    // `src/world/data/zones.js`'s ASSIGNED `entryTags` for any field zone
+    // and that file is not in this ticket's grant. Reported.
+    if (!inst.descriptor.entryTags.includes(entryTag) && !inst.entries.has(entryTag)) {
       throw new Error(`world.entry: unknown entryTag '${entryTag}' for zone '${inst.zoneId}'`);
     }
 
@@ -710,6 +766,103 @@ export class WorldSystem {
     return this._current ? this._current.packs : [];
   }
 
+  // ─── WRLD-10 (07 §10) — thin forwards into ./transition.js ──────────────
+
+  /** `02-api-contracts.md` §5: `interactableAt(x,z,radius) => Interactable |
+   * null` — the nearest ENABLED one whose disc overlaps, ties by lower `id`
+   * (`07` §9.3). Returns a shared scratch (`Alloc: no`); copy, never stash. */
+  interactableAt(x, z, radius) {
+    return interactableAtImpl(this._transition, this._current, x, z, radius);
+  }
+
+  /** `02-api-contracts.md` §5: `setExitSealed(zoneId, exitTag, sealed)`. */
+  setExitSealed(zoneId, exitTag, sealed) {
+    setExitSealedImpl(this._transition, this._current, zoneId, exitTag, sealed);
+  }
+
+  /** `02-api-contracts.md` §5: `openChest(chestId) => boolean` — `false`
+   * when it was already open. */
+  openChest(chestId) {
+    return openChestImpl(this._transition, this._current, chestId);
+  }
+
+  /** `02-api-contracts.md` §5 / `07` §10.5: `openPortal(fromX, fromZ,
+   * toZone, toEntryTag) => int portalId`. `0` means refused (in town, in the
+   * Altar before the boss is down, or with no retained destination) — which
+   * is the signal `items` needs to not spend the consumable. */
+  openPortal(fromX, fromZ, toZone, toEntryTag) {
+    return openPortalImpl(this._transition, this._ctx, this, fromX, fromZ, toZone, toEntryTag);
+  }
+
+  /** `02-api-contracts.md` §5: `closePortal(portalId) => void`. */
+  closePortal(portalId) {
+    closePortalImpl(this._transition, this._ctx, this, portalId);
+  }
+
+  /** `02-api-contracts.md` §5: `portalAt(x,z,radius) => int portalId | 0` —
+   * resolves either end of a town portal (`07` §10.5 step 4). */
+  portalAt(x, z, radius) {
+    return portalAtImpl(this._current, x, z, radius);
+  }
+
+  /** NOT contracted in `02-api-contracts.md` §5 — see `./transition.js`'s
+   * `usePortal` for the `portal:use` emitter disagreement between `07` §10.5
+   * and `ARCHITECTURE.md`, and why this method exists at all. Emits
+   * `portal:use` and starts the transition. */
+  usePortal(portalId) {
+    return usePortalImpl(this._transition, this._ctx, this, portalId);
+  }
+
+  /** `07` §10.1/§10.2 T1 — start a faded transition (350 ms out, a constant
+   * 600 ms black, 350 ms in). Hands the actual zone change to the existing
+   * `requestZone` latch, so the pipeline is unchanged (D-66). `false` when a
+   * transition is already running. */
+  beginTransition(zoneId, entryTag, opts) {
+    return beginTransitionImpl(this._transition, this._ctx, this, zoneId, entryTag, opts);
+  }
+
+  /** `07` §10.1's fade value, 0 = visible, 1 = black. `ui` reads this; there
+   * is no `world`-emitted fade event (adding one would need a new row in
+   * `ARCHITECTURE.md`'s table, and a polled scalar needs none). */
+  get transitionFade() {
+    return this._transition.fade;
+  }
+
+  /** `'idle' | 'fade_out' | 'black' | 'fade_in'`. */
+  get transitionPhase() {
+    return this._transition.phase;
+  }
+
+  /** The last completed leg's ENGINE-TIME breakdown (see `./transition.js`'s
+   * header — these are integrated `ctx.time.raw` milliseconds, not a wall
+   * clock, and no acceptance number is taken from them). */
+  get transitionTiming() {
+    return this._transition.lastLeg;
+  }
+
+  /** `07` §10.1's own envelope constants, exposed so a test/harness asserts
+   * against the same numbers the state machine runs on. */
+  get transitionBudget() {
+    return TRANSITION_MS;
+  }
+
+  /** Report/test-only: the `(zoneId, seed)` keys currently retained
+   * (`01-data-model.md` §9.3's cap of two). */
+  get retainedZoneKeys() {
+    return Array.from(this._transition.retained.keys());
+  }
+
+  /** `07` §10.5 "One at a time" — the single live town portal's id, or `0`. */
+  get townPortalId() {
+    return this._transition.townPortalId;
+  }
+
+  /** Presentation only (`ARCHITECTURE.md` rule 5): advances the transition
+   * envelope. A no-op, allocation-free, when no transition is running. */
+  update(dt, ctx) {
+    advanceTransitionImpl(this._transition, ctx || this._ctx, this, dt);
+  }
+
   /**
    * `02-api-contracts.md` §5: `enterZone(zoneId, entryTag, opts?) =>
    * Promise<ZoneInstance>`. `Fixed: N` — never call this from
@@ -743,6 +896,11 @@ export class WorldSystem {
     const previous = this._current;
     if (previous) {
       events.emit('zone:teardown', { zoneId: previous.zoneId });
+      // WRLD-10 (T3) — snapshot the outgoing zone's ground items and decide
+      // whether its `ZoneInstance` survives (`07` §10.4). Runs AFTER
+      // `zone:teardown` so `ai`/`skills`/`fx` have already depopulated, and
+      // BEFORE any geometry is disposed.
+      retainOnTeardown(this._transition, this._ctx, previous, zoneId, this._genOfCurrent);
     }
     this._clearPreviousStatics();
     this._disposeWastesGeometry(); // WRLD-6 — see the field's own comment
@@ -752,6 +910,12 @@ export class WorldSystem {
     const isWastes = zoneId === 'ashen_wastes'; // WRLD-6 — no other generator exists yet (rule 11)
     const isBonereach = zoneId === 'bonereach'; // WRLD-7 — WRLD-8/9/10 land behind this ticket (rule 11)
     const isAltar = zoneId === 'altar_of_instruction'; // WRLD-8
+    // WRLD-10 — `07` §10.4's retained-instance path. `(zoneId, seed)` is the
+    // whole key (§13's own "Not requested, and why"), and `seed` already
+    // folds `runIndex`, so an exit/descent (which advances `runIndex`) can
+    // never collide with a portal return (which does not).
+    const retained = retainedFor(this._transition, zoneId, seed);
+    const retainedGen = retained ? retained.gen : null;
 
     // WRLD-6 (T6 — Layout): the pure generator. `07` §3.2's own emission
     // order is "R1..R10 (pure, no three) -> geometry build -> physics.rebuild()
@@ -768,10 +932,21 @@ export class WorldSystem {
     let terraces = DEFAULT_TERRACES;
 
     if (isWastes) {
-      wastesLayout = generateRidgewalkLayout(seed, descriptor);
-      wastesDressing = runR8Dressing(wastesLayout, descriptor, wastesLayout.streams);
-      wastesBoundary = runR9Boundary(wastesLayout, descriptor, wastesLayout.streams);
-      wastesEntries = placeRidgewalkEntries(wastesLayout, descriptor, wastesLayout.streams);
+      if (retainedGen) {
+        // WRLD-10 / `07` §10.4 — "skips T6 entirely". The generator is not
+        // re-run; its own output is handed straight back, which is both
+        // faster and, more importantly, bit-identical by construction rather
+        // than only by determinism.
+        wastesLayout = retainedGen.wastesLayout;
+        wastesDressing = retainedGen.wastesDressing;
+        wastesBoundary = retainedGen.wastesBoundary;
+        wastesEntries = retainedGen.wastesEntries;
+      } else {
+        wastesLayout = generateRidgewalkLayout(seed, descriptor);
+        wastesDressing = runR8Dressing(wastesLayout, descriptor, wastesLayout.streams);
+        wastesBoundary = runR9Boundary(wastesLayout, descriptor, wastesLayout.streams);
+        wastesEntries = placeRidgewalkEntries(wastesLayout, descriptor, wastesLayout.streams);
+      }
       // O-99's own trigger: WRLD-5's R5 emits real -2.20 m ravines / +1.20 m
       // shelves in `wastesLayout.terraces` — using those (instead of
       // `DEFAULT_TERRACES`'s single flat 0.00 m layer) is what makes the
@@ -798,13 +973,22 @@ export class WorldSystem {
     let bonereachExit = null;
 
     if (isBonereach) {
-      bonereachLayout = generateBonereachLayout(seed, descriptor);
-      const loot = placeBonereachLoot(bonereachLayout, descriptor, bonereachLayout.streams);
-      bonereachChests = loot.chests;
-      bonereachDressing = runBonereachDressing(bonereachLayout, descriptor, bonereachLayout.streams);
-      const placed = placeBonereachEntries(bonereachLayout, descriptor);
-      bonereachEntries = placed.entries;
-      bonereachExit = placed.exit;
+      if (retainedGen) {
+        // WRLD-10 / `07` §10.4 — T6 skipped, see the Wastes branch above.
+        bonereachLayout = retainedGen.bonereachLayout;
+        bonereachDressing = retainedGen.bonereachDressing;
+        bonereachChests = retainedGen.bonereachChests;
+        bonereachEntries = retainedGen.bonereachEntries;
+        bonereachExit = retainedGen.bonereachExit;
+      } else {
+        bonereachLayout = generateBonereachLayout(seed, descriptor);
+        const loot = placeBonereachLoot(bonereachLayout, descriptor, bonereachLayout.streams);
+        bonereachChests = loot.chests;
+        bonereachDressing = runBonereachDressing(bonereachLayout, descriptor, bonereachLayout.streams);
+        const placed = placeBonereachEntries(bonereachLayout, descriptor);
+        bonereachEntries = placed.entries;
+        bonereachExit = placed.exit;
+      }
       // The stair room's 6-step ramp down to -2.40 m (07 §4.1) — real
       // terraces, the same "replace DEFAULT_TERRACES wholesale" mechanism
       // O-99 already established for Ridgewalk's ravines/shelves, so
@@ -818,8 +1002,14 @@ export class WorldSystem {
     let altarLayout = null;
     let altarDressing = null;
     if (isAltar) {
-      altarLayout = generateAltarLayout(seed, descriptor);
-      altarDressing = runAltarDressing(altarLayout, descriptor, altarLayout.streams);
+      if (retainedGen) {
+        // WRLD-10 / `07` §10.4 — T6 skipped, see the Wastes branch above.
+        altarLayout = retainedGen.altarLayout;
+        altarDressing = retainedGen.altarDressing;
+      } else {
+        altarLayout = generateAltarLayout(seed, descriptor);
+        altarDressing = runAltarDressing(altarLayout, descriptor, altarLayout.streams);
+      }
       terraces = altarLayout.terraces; // the three §5.1 terraces, per-nav-row — see ./gen/altar.js
     }
     this._altarLayout = altarLayout;
@@ -954,7 +1144,12 @@ export class WorldSystem {
       packs: [],
       portals,
       entries,
-      chests,
+      // WRLD-10 — the generators emit their own richer chest record with no
+      // `id`/`opened`; `01` §9.2 wants `{ id, x, z, opened, treasureClass }`
+      // and `world.openChest(chestId)`/§10.4's "chest `opened` flags are
+      // preserved" both need those two fields. `normalizeChests` adds them in
+      // place, keeping every generator field.
+      chests: normalizeChests(chests),
       interactables,
 
       cleared: false,
@@ -997,7 +1192,36 @@ export class WorldSystem {
       }
     }
 
+    // WRLD-10 (T13a) — everything a retained instance must carry BACK before
+    // `ai` reads `world.packs` inside its own `zone:ready` listener: chest
+    // `opened` flags, `cleared`/`bossDefeated`, the portals, the dynamic
+    // `portal_return` entry, and the pack survivor counts that make §10.4's
+    // "a cleared pack is not respawned" true. See `./transition.js`'s header
+    // for why this cannot wait until after T12 the way §10.2's table draws it.
+    this._retainReport = applyRetainedState(this._transition, instance, retained);
+
+    // WRLD-10 — `07` §9.3's `Interactable[]` for this zone (chests, the exit
+    // trigger, the town's fixed portal pad, plus whatever the generator
+    // already authored). Built AFTER the retained restore above, so a chest
+    // that was already open comes back with its prompt already disabled.
+    buildInteractables(this._transition, instance, {
+      exit: isWastes ? wastesEntries.exit : isBonereach ? bonereachExit : null,
+    });
+
     events.emit('zone:ready', { zoneId, bounds, navVersion: instance.navVersion });
+
+    // WRLD-10 (T13b) — `ai`'s spawn pass has just run, so `monstersAlive` is
+    // knowable; and this is where §10.2's table puts the ground-item re-drop.
+    finishZoneRestore(this._transition, this._ctx, instance);
+
+    // WRLD-10 — keep this zone's T6 products so a retained re-entry can skip
+    // the generator (see `retainedGen` above). Replaced wholesale, never
+    // mutated.
+    this._genOfCurrent = {
+      wastesLayout, wastesDressing, wastesBoundary, wastesEntries,
+      bonereachLayout, bonereachDressing, bonereachChests, bonereachEntries, bonereachExit,
+      altarLayout, altarDressing,
+    };
 
     return instance;
   }
@@ -1081,6 +1305,8 @@ export class WorldSystem {
   }
 
   dispose() {
+    // WRLD-10 (rule 7) — unsubscribe the `actor:death` listener `init` added.
+    if (this._ctx && this._ctx.events) this._ctx.events.off('actor:death', this._onActorDeath);
     this._clearPreviousStatics();
     this._current = null;
     this._staticFootprints = Object.freeze([]);

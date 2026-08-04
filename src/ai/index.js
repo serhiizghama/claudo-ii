@@ -174,6 +174,39 @@ import {
   immunityValue,
   DEFAULT_TIER,
 } from './rank.js';
+import {
+  createCorpseStore,
+  resetCorpseStore,
+  onCorpseDeath,
+  noteCorpseDamage,
+  stepCorpsesPre,
+  stepCorpsesPost,
+  installCorpseApi,
+  uninstallCorpseApi,
+} from './corpse.js';
+
+// ---------------------------------------------------------------------------
+// AI-9 addendum — corpses and resurrection (`06` §10.6-10.8)
+// ---------------------------------------------------------------------------
+// Wiring only, per this ticket's own grant: one new import block (above), one
+// new `this._corpseStore` plus the `this._corpseEnv` bag the new file's
+// functions take instead of eight loose arguments (constructor), one
+// `installCorpseApi` call and one new `actor:death` listener plus ONE line
+// added to the EXISTING `actor:damage` listener (`init`), one line in the
+// EXISTING `_onZoneReady` (the corpse store is per zone visit), two calls in
+// `fixedUpdate` (one before the brain loop, one after it and before the nav
+// scheduler), one uncontracted `corpseStats` accessor, and one
+// `uninstallCorpseApi` in `dispose`. `spawnOne`/`brainOf`/`aliveCount` are
+// byte-for-byte unchanged and this ticket adds no new brain state.
+//
+// The judgement call, stated plainly rather than buried: `installCorpseApi`
+// DEFINES `resurrectableCorpses`/`resurrect` on the live `ActorsSystem`
+// instance when they are absent — which they are, because ACTR-17
+// (`src/actors/death.js`) is unbuilt and outside this grant, and
+// `brains/shaman.js` (also outside it) gates the entire raise path on
+// `typeof actors.resurrectableCorpses === 'function'`. See `./corpse.js`'s
+// own header for the full reasoning, the alternative that was rejected, and
+// the pre-existing test this breaks.
 
 // ---------------------------------------------------------------------------
 // AI-8 addendum — champions, uniques and the nine affixes (`06` §5.7, §5.8, §6)
@@ -404,6 +437,15 @@ export class AiSystem {
      * same preallocated parallel-array shape as every store above. */
     this._affixStore = createAffixStore(MAX_BRAINS);
 
+    /** AI-9 — `./corpse.js`'s own per-actor bag (the corpse record, the
+     * §8.5 eligibility fields, the raise counter, the in-flight-ritual
+     * stamps). Same "built once, passed by reference" convention as every
+     * store above. `_corpseEnv` is the one environment object those
+     * functions take — built in `init()` once the subsystems it names are
+     * resolvable, never rebuilt, so nothing here allocates per step. */
+    this._corpseStore = createCorpseStore(MAX_BRAINS);
+    this._corpseEnv = null;
+
     /** AI-8 scratch, all reused — `ARCHITECTURE.md` rule 6. `_affixRoll` is
      * the per-pack `rollAffixes` output, `_affixScratch` the read-back buffer
      * for `affixesOf`, `_affixLayerScratch` the merged StatBlock partial
@@ -437,6 +479,32 @@ export class AiSystem {
     // exists before any future ticket's temptation to fork per-event.
     this._rng = ctx.rng.fork();
 
+    // AI-9 — the one environment object `./corpse.js` reads. Built here, not
+    // in the constructor, because `ctx` itself does not exist until `init`
+    // and `actors` is only resolvable once the registry has run its own
+    // `init` (this system's `static deps` order).
+    this._corpseEnv = {
+      ctx,
+      // `peek`, not `get`: `actors` is a hard `static deps` in every real
+      // boot, but this is `init()` — a stub `ctx` that never registers it
+      // should degrade (no corpses) rather than make `ai.init` throw where
+      // it never did before. Same precedent `fixedUpdate` uses for `nav`.
+      actors: ctx.peek('actors') || null,
+      store: this._corpseStore,
+      brains: this._brains,
+      perception: this._perception,
+      navStore: this._navStore,
+      shamanStore: this._shamanStore,
+      hasteStore: this._hasteStore,
+      affixStore: this._affixStore,
+      BRAIN_STATE,
+      _corpseQuery: null,
+      _corpseRevive: null,
+    };
+    // `02-api-contracts.md` §7's two corpse rows, which no shipped
+    // `ActorsSystem` forwards — see `./corpse.js`'s header.
+    installCorpseApi(this._corpseEnv);
+
     // AI-3 — wiring `perception.js`'s event-driven half (§4.5 noise, §4.6's
     // damage/death pack-alert triggers, S17). Draws no randomness, does not
     // touch `this._rng` — rule 3's "do not take a second fork" is about
@@ -446,8 +514,14 @@ export class AiSystem {
       // AI-7 — §10.3's deactivation clause needs "no member damaged in
       // 10.0 s"; this is the only place that clock can be stamped.
       if (payload && payload.target) notePackDamage(this._spawnStore, payload.target.poolIndex, ctx.time.step);
+      // AI-9 — `08` §8.4's overkill gib needs the killing blow's magnitude,
+      // and this listener is the only place it is ever visible to `ai`.
+      noteCorpseDamage(this._corpseEnv, payload);
     });
     ctx.events.on('actor:death', (payload) => onActorDeath(ctx, ctx.get('actors'), this._brains, this._perception, BRAIN_STATE, payload));
+    // AI-9 — `06` §10.6's corpse record, §2.4's "on the Shaman's death"
+    // haste strip, and `08` §6.6's "death cancels the wind-up".
+    ctx.events.on('actor:death', (payload) => onCorpseDeath(this._corpseEnv, payload));
     // AI-6 — `carrion_swarm`'s own scatter (§3.7 C2), evaluated on every
     // `actor:death`, same event-listener precedent as the two rows above.
     ctx.events.on('actor:death', (payload) => onSwarmDeath(ctx, ctx.get('actors'), ctx.peek('nav'), this._brains, this._perception, this._swarmStore, BRAIN_STATE, payload));
@@ -500,6 +574,9 @@ export class AiSystem {
     // `PackDescriptor.id`" — is what fixes the stream, so the sort is
     // asserted here rather than assumed of `world`.
     resetAffixStore(this._affixStore);
+    // AI-9 — corpses are per zone visit (§10.5 despawns every actor, and the
+    // Shaman's single revive credit is spawned fresh with it).
+    resetCorpseStore(this._corpseStore);
     this._rollPackAffixes(world);
 
     runSpawnPass({
@@ -919,6 +996,14 @@ export class AiSystem {
     return this._spawnStore.stats;
   }
 
+  /** AI-9, not contracted — `./corpse.js`'s own counters (corpses baked,
+   * gibbed, evicted, dissolved, raised, refused, fizzled, interrupted). Kept
+   * off `stats` so that documented shape is unchanged, same precedent as
+   * `spawnStats`. */
+  get corpseStats() {
+    return this._corpseStore.stats;
+  }
+
   /** `aliveCount` -> `int`. Brains whose actor is not dead. */
   get aliveCount() {
     return this._countBrains((actor) => !actor.dead);
@@ -1001,6 +1086,12 @@ export class AiSystem {
         if (world && world.current) despawnEscaped(spawnStore, actors, world.bounds());
       }
     }
+
+    // AI-9 — §8.3's corpse ageing and §2.4's `raise_ranker` interruption,
+    // both BEFORE any brain steps: `stepShamanBrain` resolves a `hitTick`
+    // that falls on this step at the top of its own call, so a stun already
+    // live at the start of this step has to cancel the cast first.
+    stepCorpsesPre(this._corpseEnv);
 
     for (let i = 0; i < live.length; i++) {
       const actor = live[i];
@@ -1101,6 +1192,13 @@ export class AiSystem {
       if (decided) this._decisionCount++;
     }
 
+    // AI-9 — §10.7's fresh brain for anything raised this step, and §10.7's
+    // fizzle debit. After the loop because `brains/shaman.js` writes
+    // `state = dormant, targetId = 0` over the revived brain the instant
+    // `actors.resurrect` returns; before the nav scheduler so a brain raised
+    // this step gets its goal computed in the same step it starts chasing.
+    stepCorpsesPost(this._corpseEnv);
+
     // AI-4 — `06` §9: the ring scheduler, flow-field default/cadence and the
     // >40 hard demotion, after the brain-state loop so a same-step state
     // transition (e.g. leash firing this step) is reflected in this step's
@@ -1115,6 +1213,10 @@ export class AiSystem {
   }
 
   dispose() {
+    // AI-9 — hand `actors` back exactly as it was found (`ARCHITECTURE.md`
+    // rule 7's own discipline, applied to a method rather than a texture).
+    if (this._corpseEnv) uninstallCorpseApi(this._corpseEnv);
+    this._corpseEnv = null;
     this._ctx = null;
     this._rng = null;
   }

@@ -63,6 +63,7 @@ import { Inventory } from './inventory.js';
 import { Sheet } from './sheet.js';
 import { Target } from './target.js';
 import { Tree } from './tree.js';
+import { Minimap } from './minimap.js';
 
 /** `02-api-contracts.md` §14's `setScreen` signature — verbatim. */
 const VALID_SCREENS = new Set(['boot', 'main_menu', 'character_create', 'game', 'death', 'reward_choice']);
@@ -99,6 +100,7 @@ export class UiSystem {
     this._sheet = null; // UI-10's character sheet + paperdoll module (./sheet.js), built in init()
     this._target = null; // UI-8's target bar + buff strip module (./target.js), built in init()
     this._tree = null; // UI-9's skill tree module (./tree.js), built in init()
+    this._minimap = null; // UI-11's minimap + ground-label module (./minimap.js), built in init()
 
     // ---------------------------------------------------------------
     // O-78, the `ui` half of `pointerOverUi` (`09` §11.4) — UI-10 is the
@@ -233,6 +235,20 @@ export class UiSystem {
     // tree.js's own header).
     this._tree = new Tree(ctx, layers.panels, (key, params) => this.t(key, params), rng, (text, kind) => this.toast(text, kind));
 
+    // UI-11 (09 §15 U11) — the corner minimap, the `Tab` overlay and the
+    // ground-item labels. Attached into `layers.hud`, the same persistent-HUD
+    // band `Hud`/`Hotbar`/`Target` already occupy. `09 §3.4` puts the labels
+    // on their own z20 world band, which this codebase's 8-layer stack
+    // (./style.js#LAYER_NAMES) does not have; they go on `hud` with the
+    // minimap rather than restructuring a layer stack eight accepted modules
+    // sit on — recorded in this ticket's report. The fifth argument is O-78's
+    // swallow hook: a ground label is the only world-anchored clickable in
+    // the whole overlay, and `09 §9.5` requires its click to never also be a
+    // move order (see minimap.js#_onLabelPointerDown for why
+    // `stopPropagation()` alone does not achieve that against `player`'s
+    // latched input snapshot).
+    this._minimap = new Minimap(ctx, layers.hud, (key, params) => this.t(key, params), rng, () => this._armPointerSwallow(ctx));
+
     // O-78 — the `ui` half of `pointerOverUi` (09 §11.4). Installed once
     // here, after every panel module above has had a chance to build its
     // own DOM (not that installation order matters — this only reads
@@ -262,6 +278,16 @@ export class UiSystem {
     if (this._sheet) this._sheet.update(dt, ctx);
     if (this._target) this._target.update(dt, ctx);
     if (this._tree) this._tree.update(dt, ctx);
+    // UI-11 — last of the group: the ground labels project against the same
+    // camera the world was drawn with this frame. `09 §4.7`'s "hidden while a
+    // `left`-zone panel is open" is arbitrated here, not inside the module,
+    // because `ui` is the one owner of panel state — and the only `left`
+    // panel that exists today (`09 §3.3`'s table also lists stash, vendor and
+    // the quest log, all UI-12) is the character sheet.
+    if (this._minimap) {
+      this._minimap.setCornerSuppressed(!!(this._sheet && this._sheet.isOpen()));
+      this._minimap.update(dt, ctx);
+    }
   }
 
   /**
@@ -293,6 +319,9 @@ export class UiSystem {
     // switch its displayed name live, the same way `setAltHeld` already
     // forces a live content rebuild.
     if (this._tooltip) this._tooltip.setLanguage(this._lang);
+    // UI-11: the same live-switch reason — a ground label carries a rolled
+    // item name, and the zone name under the minimap is a dictionary lookup.
+    if (this._minimap) this._minimap.setLanguage(this._lang);
   }
 
   /**
@@ -342,6 +371,13 @@ export class UiSystem {
     // panel (`close(true)`, bypassing the close-with-pending dialog: this
     // is teardown, not a user asking to leave with unconfirmed points).
     if (this._tree && screenId !== 'game') this._tree.close(true);
+    // UI-11: the minimap is the same "persistent HUD chrome" class as the
+    // plinth. Leaving `game` also closes the `Tab` overlay — it draws over
+    // the world, and there is no world under a menu.
+    if (this._minimap) {
+      this._minimap.setVisible(screenId === 'game');
+      if (screenId !== 'game') this._minimap.setMinimapOpen(false);
+    }
   }
 
   /** Removes every DOM node this subsystem created (`ARCHITECTURE.md` rule
@@ -367,6 +403,8 @@ export class UiSystem {
     this._target = null;
     if (this._tree) this._tree.dispose();
     this._tree = null;
+    if (this._minimap) this._minimap.dispose();
+    this._minimap = null;
     this._removePointerGuard();
     if (this._root) this._root.remove();
     this._root = null;
@@ -396,6 +434,61 @@ export class UiSystem {
    */
   setAltHeld(on) {
     if (this._tooltip) this._tooltip.setAltHeld(on);
+    // UI-11 — the other half the contract row names: `09 §9.2` rule 3, "Alt
+    // is held → show every ground-item label".
+    if (this._minimap) this._minimap.setAltHeld(on);
+  }
+
+  /**
+   * `02-api-contracts.md:1289`: `setLootLabels(on) => void` — `09 §9.2` rule
+   * 4, `SettingsSave.alwaysShowLoot`. Unimplemented until UI-11 because there
+   * were no labels to show.
+   */
+  setLootLabels(on) {
+    if (this._minimap) this._minimap.setLootLabels(on);
+  }
+
+  /**
+   * `02-api-contracts.md:1301`: `setMinimapOpen(on) => void` — `09 §4.7`'s
+   * overlay mode, `09 §11.2`'s `Tab` (`toggle_map`). `ui` may not read
+   * `ctx.input` (`09 §16.1`), so `player` owns the key and calls this.
+   */
+  setMinimapOpen(on) {
+    if (this._minimap) this._minimap.setMinimapOpen(on);
+  }
+
+  /** @returns {boolean} whether the `Tab` overlay is up. */
+  isMinimapOpen() {
+    return this._minimap ? this._minimap.isMinimapOpen() : false;
+  }
+
+  /**
+   * `09 §11.2`'s `M` (`toggle_minimap`) — the corner map on/off. UI-11's own
+   * new row, the same shape `toggleCharacterSheet`/`toggleSkillTree` took:
+   * `02-api-contracts.md` §14 has `setMinimapOpen` for `Tab` but no row for
+   * `M`, and `ui` may not discover the key itself. Flagged in this ticket's
+   * report alongside the other missing rows.
+   */
+  toggleMinimap() {
+    if (this._minimap) this._minimap.toggleCorner();
+  }
+
+  /** `02-api-contracts.md:1302`: `minimapMarker(id, x, z, kind) => void`. */
+  minimapMarker(id, x, z, kind) {
+    if (this._minimap) this._minimap.minimapMarker(id, x, z, kind);
+  }
+
+  /** `02-api-contracts.md:1303`: `clearMinimapMarker(id) => void`. */
+  clearMinimapMarker(id) {
+    if (this._minimap) this._minimap.clearMinimapMarker(id);
+  }
+
+  /** O-78's swallow window, armed by something other than the guard's own
+   * captured `pointerdown`. `./minimap.js`'s ground labels need it: `player`
+   * suppresses a new order only through `pointerOverUi`, and it reads a
+   * latched input snapshot rather than the DOM event (`09 §9.5`). */
+  _armPointerSwallow(ctx) {
+    this._swallowUntilFrame = this._currentFrame(ctx || this._ctx) + 2;
   }
 
   /**

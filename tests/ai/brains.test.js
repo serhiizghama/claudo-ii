@@ -335,8 +335,18 @@ test('SCENARIO dust_shaman: chases from range, holds and bolts in band, backs aw
     // this milestone (see brains/shaman.js's own header) — reviveCredits
     // must still read 1 (never spent) after a long run.
     for (let i = 0; i < 200; i++) step(ctx, ai, combat);
-    assert.equal(ai._shamanStore.reviveCredits[shaman.poolIndex], 1, 'O-87/09-gap: raise_ranker never fires — actors.resurrectableCorpses does not exist yet');
-    assert.equal(typeof actors.resurrectableCorpses, 'undefined', 'confirms the guard\'s precondition: ActorsSystem does not forward resurrectableCorpses this milestone');
+    assert.equal(ai._shamanStore.reviveCredits[shaman.poolIndex], 1, 'raise_ranker never fires in this scenario — there is no corpse to raise');
+    // Updated by AI-9. This line used to read `typeof
+    // actors.resurrectableCorpses === 'undefined'` — an assertion that pinned
+    // the MOMENT ("no such method this milestone") rather than a behaviour,
+    // and the same shape O-27/O-39 forbid in production code. AI-9 shipped the
+    // query, so the precondition it claimed to confirm is simply gone. What
+    // this scenario actually demonstrates is stronger and is what is asserted
+    // now: the query EXISTS, and the credit is still unspent because this
+    // fixture kills nothing, not because the API is missing.
+    assert.equal(typeof actors.resurrectableCorpses, 'function', 'AI-9 ships the 02 §7 query');
+    const corpseOut = [];
+    assert.equal(actors.resurrectableCorpses(shaman.x, shaman.z, 9.0, corpseOut), 0, 'and it honestly reports zero corpses in a fixture where nothing died');
   }
 });
 

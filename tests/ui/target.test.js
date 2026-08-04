@@ -113,10 +113,15 @@ test('D-41: Target#__debugStageRank stages all four rank layouts (+minion) witho
   const { ctx } = await boot({ canvas: makeCanvas(), deterministic: true, global: {} });
   const ui = ctx.get('ui');
   ui.setScreen('game');
-  // Sanity for D-41: `ai` is not even registered in this boot() (main.js
-  // has no `registry.add(AiSystem)` line today) — this test's own staging
-  // path (`__debugStageRank`) must not depend on it existing at all.
-  assert.equal(ctx.has('ai'), false, 'sanity: ai is not registered in this boot — D-41 staging must not depend on it');
+  // Sanity for D-41: the staging path (`__debugStageRank`) must not depend on
+  // `ai`. This used to be asserted as `ctx.has('ai') === false` — true only
+  // because `main.js` had no `registry.add(AiSystem)` line, which is a fact
+  // about the moment, not about D-41. O-112 closed and `ai` is registered now,
+  // so the independence is asserted directly instead: `ai` is present, and
+  // `debugStage` — the method D-41 forbids this path from using — is still
+  // unimplemented, so the staging below demonstrably cannot be delegating.
+  assert.equal(ctx.has('ai'), true, 'O-112: ai is registered in boot() now');
+  assert.equal(typeof ctx.get('ai').debugStage, 'undefined', 'D-41: ai.debugStage is still unimplemented, so __debugStageRank cannot be using it');
 
   const target = ui._target;
 
