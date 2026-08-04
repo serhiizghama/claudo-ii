@@ -131,6 +131,40 @@ import { createArcherStore, stepArcherBrain, ARCHER_ARCHETYPES } from './brains/
 import { createShamanStore, initShamanBrain, stepShamanBrain, createHasteStore, SHAMAN_ARCHETYPES } from './brains/shaman.js';
 import { stepMaulsmithBrain, MAULSMITH_ARCHETYPES } from './brains/maulsmith.js';
 import { createCrawlerStore, stepCrawlerBrain, CRAWLER_ARCHETYPES } from './brains/crawler.js';
+import {
+  createSpawnStore,
+  runSpawnPass,
+  spawnPackDescriptor,
+  stepActivation,
+  packTierOf,
+  notePackDamage,
+  despawnAllPacks,
+  despawnEscaped,
+  buildEntryDistanceField,
+  packTemplate as packTemplateImpl,
+  SPAWN_SAFETY,
+  PACK_TIER,
+} from './spawn.js';
+
+// ---------------------------------------------------------------------------
+// AI-7 addendum — pack templates and the spawn pass (`06` §5.1-5.6, §10.1-10.5)
+// ---------------------------------------------------------------------------
+// Wiring only, per this ticket's own grant: one new import (above), one new
+// `this._spawnStore` (constructor), two new event listeners (`zone:ready` ->
+// the §10.1 pass, `zone:teardown` -> §10.5's despawn) plus one line added to
+// the EXISTING `actor:damage` listener (§10.3's "no member damaged in 10.0 s"
+// clock), four new `02-api-contracts.md` §12 methods (`spawnPack`,
+// `packTemplate`, `despawnAll`, `setDensityBudget` — all thin forwards into
+// `./spawn.js`, the same "index.js: wiring only" precedent AI-3/AI-4/AI-5/
+// AI-6 already set), and in `fixedUpdate` ONE tier-C skip plus the §10.3
+// activation step. `spawnOne`/`brainOf`/`aliveCount` are byte-for-byte
+// unchanged.
+//
+// The tier-C skip cannot change any pre-existing behaviour: `packTierOf`
+// returns tier A for every actor that is not a member of a pack THIS file's
+// spawn pass created (see its own comment), and every monster in every
+// existing suite is hand-spawned through `spawnOne`. Verified by running the
+// full unit suite before and after — see this ticket's report.
 
 // ---------------------------------------------------------------------------
 // AI-6 addendum — the remaining five archetypes (`06` §2.2-2.6, §3.4-3.8)
@@ -288,6 +322,20 @@ export class AiSystem {
     this._crawlerStore = createCrawlerStore(MAX_BRAINS);
     this._hasteStore = createHasteStore(MAX_BRAINS);
 
+    /** AI-7 — `./spawn.js`'s own per-pack bag (pack centres, activation
+     * tier, the 10 s damage clock, the member list, `SPAWN_PUSHED`/
+     * `PACK_SIZE_RAISED`/`ESCAPED` counters). Same "built once, passed by
+     * reference" convention as every store above; exposed as a plain
+     * instance field for the same "reach a private field for test setup"
+     * precedent `_perception`/`_navStore`/`_crowdStore` already set. */
+    this._spawnStore = createSpawnStore(64);
+
+    /** AI-7 — `ai`'s OWN entry path-distance field for the current zone
+     * (`06` §10.2's re-assert, never `world`'s number). Rebuilt once per
+     * `zone:ready`, `null` before the first one. */
+    this._entryField = null;
+    this._spawnSafety = null;
+
     /** `brainOf()`'s reused scratch — same "valid until the next call, never
      * stash one" discipline `motion.js`'s `MoveResult` / `pool.js`'s no-`out`
      * `ref()` scratch already document for this codebase. */
@@ -306,7 +354,12 @@ export class AiSystem {
     // damage/death pack-alert triggers, S17). Draws no randomness, does not
     // touch `this._rng` — rule 3's "do not take a second fork" is about
     // `ctx.rng.fork()`, not event registration.
-    ctx.events.on('actor:damage', (payload) => onActorDamage(ctx, ctx.get('actors'), this._brains, this._perception, BRAIN_STATE, payload));
+    ctx.events.on('actor:damage', (payload) => {
+      onActorDamage(ctx, ctx.get('actors'), this._brains, this._perception, BRAIN_STATE, payload);
+      // AI-7 — §10.3's deactivation clause needs "no member damaged in
+      // 10.0 s"; this is the only place that clock can be stamped.
+      if (payload && payload.target) notePackDamage(this._spawnStore, payload.target.poolIndex, ctx.time.step);
+    });
     ctx.events.on('actor:death', (payload) => onActorDeath(ctx, ctx.get('actors'), this._brains, this._perception, BRAIN_STATE, payload));
     // AI-6 — `carrion_swarm`'s own scatter (§3.7 C2), evaluated on every
     // `actor:death`, same event-listener precedent as the two rows above.
@@ -318,6 +371,47 @@ export class AiSystem {
     // spread the resulting repath demand over the next 45 steps. See
     // `./nav.js#onNavRebuilt`'s own header for the algorithm.
     ctx.events.on('nav:rebuilt', (payload) => onNavRebuilt(ctx, this._brains, this._navStore, BRAIN_STATE, payload));
+
+    // AI-7 — `06` §10.1: "`ai` listens to `zone:ready` and never to
+    // `zone:enter`." Everything the pass reads (`world.packs`,
+    // `world.spawnPoints`, the just-rasterised `nav` grid) is final by the
+    // time this fires — `src/world/index.js` runs its own T10 spawn plan
+    // strictly after `nav.rebuild()` and immediately before emitting this.
+    ctx.events.on('zone:ready', () => this._onZoneReady());
+    // §10.5 row 1 — "`world.enterZone` -> `ai.despawnAll(keepQuestCritical
+    // = true)`". `world` emits `zone:teardown` for the OUTGOING zone, which
+    // is the only hook `ai` has for it (`world` never calls `ai` directly —
+    // rule 2).
+    ctx.events.on('zone:teardown', () => this.despawnAll(true));
+  }
+
+  /** AI-7 — `06` §10.1's spawn pass plus §10.2's own distance field. */
+  _onZoneReady() {
+    const ctx = this._ctx;
+    const world = ctx.peek('world');
+    const nav = ctx.peek('nav');
+    const actors = ctx.get('actors');
+    this._entryField = null;
+    this._spawnSafety = null;
+    if (world && nav && world.current) {
+      const zoneId = world.current.zoneId;
+      this._spawnSafety = SPAWN_SAFETY[zoneId] || null;
+      const tags = world.current.descriptor && world.current.descriptor.entryTags;
+      if (this._spawnSafety && tags && tags.length > 0) {
+        // `entryTags[0]` is the zone's primary arrival tag
+        // (`portal_from_town` for the Wastes, `descent` for Bonereach) —
+        // `ZoneInstance` records no entryTag of its own, so there is nothing
+        // else to read, and §10.1 forbids listening to `zone:enter` (whose
+        // payload does carry it). Disclosed in this ticket's report.
+        const e = world.entry(tags[0]);
+        this._entryField = buildEntryDistanceField(nav, e.x, e.z);
+      }
+    }
+    runSpawnPass({
+      ctx, world, actors, nav, ai: this,
+      store: this._spawnStore, perception: this._perception,
+      field: this._entryField, safety: this._spawnSafety,
+    });
   }
 
   // ─── Bestiary accessors (02-api-contracts.md §12) ──────────────────────
@@ -468,6 +562,51 @@ export class AiSystem {
     alertPackImpl(this._ctx, this._ctx.get('actors'), this._perception, this._brains, BRAIN_STATE, packId, x, z);
   }
 
+  // ─── AI-7: packs (02-api-contracts.md §12) ──────────────────────────────
+
+  /** `packTemplate(id) => PackTemplate | null` — `06` §16 A1. A thin forward
+   * into `./spawn.js`'s module-level function, which is ALSO the headless
+   * entry point `tools/mapgen.mjs` uses without instantiating `ai` at all.
+   * @param {string} id */
+  packTemplate(id) {
+    return packTemplateImpl(id);
+  }
+
+  /** `spawnPack(pack) => int spawned` — `06` §10.1's inner loop. Normally
+   * driven by this system's own `zone:ready` listener; public because
+   * `02-api-contracts.md` §12 contracts it.
+   * @param {object} pack a `PackDescriptor` */
+  spawnPack(pack) {
+    const ctx = this._ctx;
+    const world = ctx.peek('world');
+    return spawnPackDescriptor({
+      ctx, ai: this, actors: ctx.get('actors'),
+      store: this._spawnStore, perception: this._perception,
+      field: this._entryField, safety: this._spawnSafety,
+    }, pack, (world && world.spawnPoints) || []);
+  }
+
+  /** `despawnAll(keepQuestCritical) => void` — `06` §10.5 row 1.
+   * @param {boolean} keepQuestCritical */
+  despawnAll(keepQuestCritical) {
+    despawnAllPacks(this._spawnStore, this._ctx.get('actors'), keepQuestCritical !== false, this._perception);
+  }
+
+  /** `setDensityBudget(maxActive) => void` — `06` §10.3's hard cap on tier
+   * A+B. `0` (the default) means uncapped; `config.q.maxActors` is what a
+   * real boot should pass.
+   * @param {number} maxActive */
+  setDensityBudget(maxActive) {
+    this._spawnStore.densityBudget = Math.max(0, maxActive | 0);
+  }
+
+  /** AI-7, not contracted — `./spawn.js`'s own counters (`SPAWN_PUSHED`,
+   * `PACK_SIZE_RAISED`, `ESCAPED`, spawned totals). MB17 reads
+   * `spawnPushed`. Kept off `stats` so that documented shape is unchanged. */
+  get spawnStats() {
+    return this._spawnStore.stats;
+  }
+
   /** `aliveCount` -> `int`. Brains whose actor is not dead. */
   get aliveCount() {
     return this._countBrains((actor) => !actor.dead);
@@ -535,11 +674,31 @@ export class AiSystem {
     // time for this step's own dispatch below.
     processNoiseRing(ctx, actors, this._brains, this._perception, BRAIN_STATE);
 
+    // AI-7 — §10.3's activation state machine, evaluated before any brain
+    // decides so a pack that activates this step is ticked this step. Reads
+    // `ctx.time.step` only — never `dt`, never a wall clock.
+    const spawnStore = this._spawnStore;
+    if (spawnStore.count > 0) {
+      stepActivation(spawnStore, actors, ctx.time.step);
+      // §10.5's `ESCAPED` sweep. On a 30-step cadence, not every step:
+      // "it should never happen, and if it does, `physics` has a bug" — a
+      // 0.5 s detection latency on a should-never-happen condition is not
+      // worth an O(actors) scan at 60 Hz against MB13's 0.30 ms p95 budget.
+      if ((ctx.time.step % 30) === 0) {
+        const world = ctx.peek('world');
+        if (world && world.current) despawnEscaped(spawnStore, actors, world.bounds());
+      }
+    }
+
     for (let i = 0; i < live.length; i++) {
       const actor = live[i];
       const idx = actor.poolIndex;
       if (idx >= MAX_BRAINS || this._brains.active[idx] !== 1) continue;
       if (this._brains.state[idx] === BRAIN_STATE.dead) continue;
+      // AI-7 — §10.3 tier C: "pack not activated ... brain not ticked".
+      // Non-members of a spawn-pass pack report tier A, so nothing that
+      // existed before this ticket is gated (see `packTierOf`).
+      if (packTierOf(spawnStore, idx) === PACK_TIER.C) continue;
 
       if (actor.dead) {
         // S1: any -> dead. "The brain is released on the death tick" (06

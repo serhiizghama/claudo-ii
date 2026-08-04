@@ -1,19 +1,21 @@
 // tests/tools/balance.test.js
 //
-// TEST-8 acceptance smoke test for `tools/balance.mjs`. `node:test` +
-// `node:assert/strict`, driven the same way `tests/tools/lootsim.test.js`
-// drives `lootsim.mjs`: `spawnSync`, asserting on exit code and output —
-// this file is a CLI, not a module to `import`.
+// TEST-8 (`--skills`) and TEST-9 (`--monsters`, ruling D-70) acceptance smoke
+// test for `tools/balance.mjs`. `node:test` + `node:assert/strict`, driven the
+// same way `tests/tools/lootsim.test.js` drives `lootsim.mjs`: `spawnSync`,
+// asserting on exit code and output — this file is a CLI, not a module to
+// `import`.
 //
-// This is deliberately a THIN smoke test, not a re-run of the full
-// 30-skill/4158-build gate itself (see this ticket's report for that run,
-// executed and reported by hand) — a `node --test` run must stay fast. What
-// this file checks: the CLI parses its flags correctly, `--skills` emits a
-// well-formed `--json` report covering all 30 skills, the exit code is
-// MEANINGFUL, `--builds`/`--sweep`/`--monsters`/`--progression` each exit 2
-// naming their owning milestone (never a fake pass), and `12.D01`'s own
-// promise — two runs at one seed, byte-identical JSON — holds, verified
-// in-suite with an explicit SHA-256 hash of each run's stdout.
+// This is deliberately a THIN smoke test, not a re-run of either full gate
+// (see each ticket's report for the acceptance runs, executed and reported by
+// hand) — a `node --test` run must stay fast. What this file checks: the CLI
+// parses its flags correctly, `--skills` emits a well-formed `--json` report
+// covering all 30 skills, `--monsters` emits one covering all twenty `06`
+// §12.2 assertion ids, both exit codes are MEANINGFUL,
+// `--builds`/`--sweep`/`--progression` each exit 2 naming their owning
+// milestone (never a fake pass), and both determinism promises — two runs at
+// one seed, byte-identical JSON — hold, verified in-suite with an explicit
+// SHA-256 hash of each run's stdout.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,17 +35,19 @@ function sha256(s) {
   return createHash('sha256').update(s).digest('hex');
 }
 
-test('balance.mjs --help exits 0 and documents --skills', () => {
+test('balance.mjs --help exits 0 and documents both modes', () => {
   const r = run(['--help']);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /--skills/);
+  assert.match(r.stdout, /--monsters/);
   assert.match(r.stdout, /--json/);
 });
 
-test('balance.mjs with no flags exits non-zero (this build implements --skills only)', () => {
+test('balance.mjs with no flags exits non-zero and names both modes', () => {
   const r = run([]);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /--skills/);
+  assert.match(r.stderr, /--monsters/);
 });
 
 test('balance.mjs with an unrecognised flag exits 2 before doing any work', () => {
@@ -52,7 +56,9 @@ test('balance.mjs with an unrecognised flag exits 2 before doing any work', () =
   assert.match(r.stderr, /unknown flag/);
 });
 
-for (const flag of ['--builds', '--sweep', '--monsters', '--progression']) {
+// `--monsters` is NOT in this list any more: TEST-9 (ruling D-70) implements
+// it. The three below are still M7/M7/M6's own gates and must still exit 2.
+for (const flag of ['--builds', '--sweep', '--progression']) {
   test(`balance.mjs ${flag} exits 2 naming the milestone that owns it, never a fake pass`, () => {
     const r = run([flag]);
     assert.equal(r.status, 2, `${flag} must exit 2, not print a pass`);
@@ -223,4 +229,106 @@ test('D-85 — B10 at a 12.0 s window: the DR chain passes, the old 6.0 s window
   // Not vacuous: a 4.0 s-base stun on the same cooldown must still fail.
   const big = worstWindow(4.0, 4.2, 12.0);
   assert.ok(big.fraction > 0.60, `B10 must still bite: a 4.0 s stun scored only ${(big.fraction * 100).toFixed(1)}%`);
+});
+
+// ---------------------------------------------------------------------------
+// TEST-9 (D-70) — `--monsters`, the 06-monsters-ai.md §12.2 gate
+// ---------------------------------------------------------------------------
+// Thin on purpose, exactly like the `--skills` half above: the acceptance run
+// itself is executed and reported by hand (see that ticket's report), and a
+// `node --test` run must stay fast — `--monsters` takes ~2.4 s per
+// invocation, so this section spends three of them and no more. What is
+// pinned here: the mode runs at all, its exit code is MEANINGFUL, `--json`
+// renders off the same flat `checks[]` the human report does, the loud
+// skips that D-70 demanded are present and are really skips, and the
+// determinism promise holds BYTE-for-byte (no field deleted first — the
+// monsters report carries no wall-clock field at all, deliberately).
+
+let monstersJsonCache = null;
+function monstersJson(args = []) {
+  if (args.length === 0 && monstersJsonCache) return monstersJsonCache;
+  const r = run(['--monsters', '--json', ...args]);
+  const parsed = { status: r.status, report: JSON.parse(r.stdout), stdout: r.stdout };
+  if (args.length === 0) monstersJsonCache = parsed;
+  return parsed;
+}
+
+test('balance.mjs --monsters --json emits a well-formed report off the same flat checks[] the human report uses', () => {
+  const { status, report } = monstersJson();
+  assert.equal(typeof status, 'number');
+  assert.equal(report.mode, 'monsters');
+  assert.equal(report.document, '06-monsters-ai.md §12.2');
+  assert.ok(Array.isArray(report.checks) && report.checks.length > 0);
+  for (const c of report.checks) {
+    assert.equal(typeof c.id, 'string');
+    assert.equal(typeof c.scope, 'string');
+    assert.equal(typeof c.detail, 'string');
+    assert.ok(['pass', 'fail', 'warn', 'ok', 'note', 'skip'].includes(c.status), `unexpected status '${c.status}' on ${c.id}`);
+  }
+  const counted = report.passed + report.failed + report.warned + report.notes + report.skipped;
+  assert.equal(counted, report.checks.length, 'every check must be counted in exactly one summary bucket');
+  // No wall-clock field: the determinism test below hashes the raw bytes.
+  assert.equal(report.seconds, undefined, '--monsters --json must carry no elapsed-time field');
+});
+
+test('balance.mjs --monsters covers every 06 §12.2 assertion id — MB1..MB20, none quietly dropped (O-58)', () => {
+  const { report } = monstersJson();
+  const seen = new Set(report.checks.map((c) => c.id.split('.')[0]));
+  const all = ['MB1', 'MB2', 'MB3', 'MB4', 'MB5', 'MB5b', 'MB6', 'MB7', 'MB8', 'MB9', 'MB10',
+    'MB11', 'MB12', 'MB13', 'MB14', 'MB15', 'MB16', 'MB17', 'MB18', 'MB19', 'MB20'];
+  for (const id of all) assert.ok(seen.has(id), `assertion '${id}' must appear in the report, even if only as a loud skip`);
+});
+
+test('balance.mjs --monsters: MB5/MB5b (Molgrim, M6) and MB6 (class spread, M7) are LOUD skips naming their milestone — never a fake pass', () => {
+  const { report } = monstersJson();
+  for (const [id, milestone] of [['MB5', /M6/], ['MB5b', /M6/], ['MB6', /M7/]]) {
+    const rows = report.checks.filter((c) => c.id === id);
+    assert.equal(rows.length, 1, `${id} must appear exactly once`);
+    assert.equal(rows[0].status, 'skip', `${id} must report skip, never pass`);
+    assert.match(rows[0].detail, milestone, `${id}'s skip must name the milestone that owns it`);
+  }
+  // MB13 is D-79's permanent NOTE and must stay a note, carrying its arithmetic.
+  const mb13 = report.checks.filter((c) => c.id === 'MB13');
+  assert.equal(mb13.length, 1);
+  assert.equal(mb13[0].status, 'note', 'MB13 must be a counted NOTE (D-79), never silently passed or dropped');
+  assert.match(mb13[0].detail, /D-79/);
+  assert.match(mb13[0].detail, /8\.33/, 'MB13\'s note must carry the measured arithmetic, not just a verdict');
+});
+
+test('balance.mjs --monsters: MB16/MB17 are real measurements over generated zones (D-75), not deferred any more', () => {
+  const { report } = monstersJson();
+  const mb16 = report.checks.find((c) => c.id === 'MB16');
+  const mb17 = report.checks.find((c) => c.id === 'MB17');
+  assert.ok(mb16 && mb17);
+  for (const c of [mb16, mb17]) {
+    assert.ok(c.status === 'pass' || c.status === 'fail', `${c.id} must be a real verdict now that src/world/gen/ exists (D-75), got '${c.status}'`);
+    assert.match(c.scope, /layouts/, `${c.id}'s scope must state how many generated layouts it measured`);
+  }
+  assert.match(mb16.detail, /nav-fail\/physics-pass/);
+  assert.match(mb17.detail, /SPAWN_PUSHED = /);
+});
+
+test('balance.mjs --monsters exit code is meaningful: 1 iff a fail-severity check failed, notes and skips never flip it', () => {
+  const { status, report } = monstersJson();
+  assert.equal(status, report.failed > 0 ? 1 : 0, `exit code must be ${report.failed > 0 ? 1 : 0} when failed=${report.failed}`);
+  assert.ok(report.notes > 0 && report.skipped > 0, 'this run is expected to carry both notes and skips');
+});
+
+test('balance.mjs --monsters --json is byte-identical across two runs at one seed (no field excluded first)', () => {
+  const a = run(['--monsters', '--json', '--seed=0x1234']);
+  const b = run(['--monsters', '--json', '--seed=0x1234']);
+  assert.equal(a.status, b.status);
+  assert.equal(sha256(a.stdout), sha256(b.stdout), 'two --monsters runs at one seed must hash identically, byte for byte');
+});
+
+test('balance.mjs --monsters prints a per-assertion human report and --skills/--monsters cannot be combined', () => {
+  const human = run(['--monsters']);
+  assert.match(human.stdout, /balance\.mjs --monsters/);
+  assert.match(human.stdout, /MB1\b/);
+  assert.match(human.stdout, /RESULT: (PASS|FAIL)/);
+  assert.match(human.stdout, /pass · .* fail · .* warn · .* notes · .* skip/);
+
+  const both = run(['--skills', '--monsters']);
+  assert.equal(both.status, 2, 'the two modes are separate and must not be combined');
+  assert.match(both.stderr, /may not be combined/);
 });

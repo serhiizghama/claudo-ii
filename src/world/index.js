@@ -243,6 +243,17 @@ import {
   toFootprints as bonereachToFootprints,
 } from './gen/bonereach.js';
 import { buildBonereachGeometry, disposeBonereachGeometry } from './build/bonereach.js';
+// WRLD-8 — the Altar of Instruction's fixed arena (`07` §5). Headless, no
+// `three` (D-78 grants `src/world/build/` a `three` exception; `gen/` gets
+// none), and the backlog's Files column names exactly one file for this
+// ticket, so there is no `./build/altar.js` to import — the arena has nav
+// and physics geometry but no visible mesh yet. `toFootprints` collides by
+// name with both Wastes's and Bonereach's, hence the alias.
+import {
+  generateAltarLayout,
+  runAltarDressing,
+  toFootprints as altarToFootprints,
+} from './gen/altar.js';
 // WRLD-9 — R11 (`07` §8): spawn points and pack descriptors. Pure, headless
 // (no `ctx`) — see `./spawn.js`'s own header. Wired in below at T10, strictly
 // AFTER `nav.rebuild(instance)` (the live grid it reads must already carry
@@ -497,6 +508,12 @@ export class WorldSystem {
      * spawn pass — rule 11). Report/test-only, not a gameplay-facing field;
      * `spawnPoints`/`packs` below are the contracted surface (O-71). */
     this._spawnReport = null;
+
+    /** WRLD-8 — the current zone's Altar layout/dressing (`null` for every
+     * other zone kind). Report/test-only, same discipline as
+     * `_wastesLayout`/`_bonereachLayout` above. */
+    this._altarLayout = null;
+    this._altarDressing = null;
   }
 
   /** @param {object} ctx */
@@ -734,6 +751,7 @@ export class WorldSystem {
     const seed = this.seedFor(zoneId, runIndex);
     const isWastes = zoneId === 'ashen_wastes'; // WRLD-6 — no other generator exists yet (rule 11)
     const isBonereach = zoneId === 'bonereach'; // WRLD-7 — WRLD-8/9/10 land behind this ticket (rule 11)
+    const isAltar = zoneId === 'altar_of_instruction'; // WRLD-8
 
     // WRLD-6 (T6 — Layout): the pure generator. `07` §3.2's own emission
     // order is "R1..R10 (pure, no three) -> geometry build -> physics.rebuild()
@@ -793,6 +811,20 @@ export class WorldSystem {
       // `nav.groundY` below carries Bonereach's own real elevation too.
       if (bonereachLayout.terraces.length > 0) terraces = bonereachLayout.terraces;
     }
+    // WRLD-8 (T6 — Layout): the fixed arena. `generateAltarLayout` draws
+    // nothing (`07` §5: "the layout is fixed"); `runAltarDressing` is the
+    // only seeded stage and every prop it emits is `blocksNav: false`, so
+    // the dressing list is deliberately NOT passed to `altarToFootprints`.
+    let altarLayout = null;
+    let altarDressing = null;
+    if (isAltar) {
+      altarLayout = generateAltarLayout(seed, descriptor);
+      altarDressing = runAltarDressing(altarLayout, descriptor, altarLayout.streams);
+      terraces = altarLayout.terraces; // the three §5.1 terraces, per-nav-row — see ./gen/altar.js
+    }
+    this._altarLayout = altarLayout;
+    this._altarDressing = altarDressing;
+
     this._bonereachLayout = bonereachLayout;
     this._bonereachDressing = bonereachDressing;
     this._bonereachExit = bonereachExit; // report/test-only — no portal-wiring ticket consumes this yet (same gap wastesEntries.exit already has)
@@ -821,7 +853,9 @@ export class WorldSystem {
       ? toFootprints(wastesDressing.props, wastesBoundary.ridgeWall)
       : isBonereach
         ? bonereachToFootprints(bonereachLayout, bonereachDressing)
-        : buildBoundaryFootprints(descriptor);
+        : isAltar
+          ? altarToFootprints(altarLayout)
+          : buildBoundaryFootprints(descriptor);
 
     const materialsSys = typeof this._ctx.peek === 'function' ? this._ctx.peek('materials') : null;
     if (isWastes && materialsSys && this._ctx.scene) {
@@ -871,6 +905,17 @@ export class WorldSystem {
 
     const entries = new Map();
     const chests = [];
+    // WRLD-8 — `07` §9.3's `Interactable[]`. `01` §9.2's `ZoneInstance` has
+    // no such field; `world.interactableAt` (`02` §5) has no other possible
+    // producer, so the array is added here and left `[]` for every zone that
+    // has none. Reported as an extension to the record, not a silent one.
+    const interactables = [];
+    const portals = [];
+    if (isAltar) {
+      entries.set('altar_entry', altarLayout.entries.altar_entry);
+      for (const p of altarLayout.portals) portals.push(p);
+      for (const it of altarLayout.interactables) interactables.push(it);
+    }
     if (isWastes) {
       entries.set('portal_from_town', wastesEntries.entries.portal_from_town);
       entries.set('descent_return', wastesEntries.entries.descent_return);
@@ -907,9 +952,10 @@ export class WorldSystem {
       nav: this._buildNavGroundY(bounds),
       spawnPoints: [],
       packs: [],
-      portals: [],
+      portals,
       entries,
       chests,
+      interactables,
 
       cleared: false,
       bossDefeated: false,

@@ -902,6 +902,114 @@ export const SHOTS = {
       world.requestZone('bonereach', 'descent', { runIndex: 15 });
     },
   },
+
+  // AI-7 (D-69) — the fourth and last M5 shot. `12-testing.md` §9.1 assigns
+  // `dense_combat` to M5 and `12`:625 requires it in the baseline; no
+  // backlog row owned it until D-69 granted it here.
+  //
+  // ---------------------------------------------------------------------
+  // Why runIndex 18 — measured headlessly first, not picked
+  // ---------------------------------------------------------------------
+  // `src/main.js` boots with `worldSeed = 0`, so a shot's only lever on
+  // which layout it gets is `runIndex`. All 20 of `runIndex` 0-19 were run
+  // headlessly through the real `world.enterZone` + this ticket's own
+  // `zone:ready` spawn pass, counting how many monsters sit inside `06`
+  // §10.3's 34 m activation radius of the biggest pack's centre — the
+  // number that decides whether this frame is "dense combat" or "one pack
+  // standing around". `runIndex 18` (seed `0xb9a10dca`) wins by a wide
+  // margin: **6 of its 9 packs, 47 of its 68 monsters** activate together,
+  // against 27 for the next best (16) and 7 for the worst (14). Measured,
+  // not assumed — same discipline `wastes_seed_a`'s own entry used.
+  //
+  // ---------------------------------------------------------------------
+  // THE BLOCKER a reviewer must know before looking at the pixels
+  // ---------------------------------------------------------------------
+  // **`AiSystem` is not registered in `src/main.js`.** `boot()`'s registry
+  // (`src/main.js`:445-456) adds render/materials/physics/world/actors/
+  // player/nav/combat/skills/ui/items/save — twelve systems, no `ai` — and
+  // `index.html` calls `boot()` with no `opts.systems`, so the page
+  // `tools/capture.mjs` drives has no `ai` subsystem at all. Nothing in
+  // `src/ai/` has ever run in the real application; AI-2 through AI-7 are
+  // reachable only from tests. `src/main.js` is lead-owned and outside
+  // AI-7's file grant, so this is reported, not fixed.
+  // CONSEQUENCE: until that one `registry.add(AiSystem)` line lands, this
+  // shot's `setup` finds no `ai`, spawns nothing, and the captured frame is
+  // `wastes_seed_*`'s Ashen Wastes at a different seed with NO monsters in
+  // it. The `setup` below degrades to exactly that rather than throwing.
+  //
+  // ---------------------------------------------------------------------
+  // What the frame will show ONCE `ai` is registered
+  // ---------------------------------------------------------------------
+  // Ashen Wastes at runIndex 18, the player teleported onto the centre of
+  // the zone's biggest pack (8 `carrion_swarm`) with that pack's brains
+  // hand-targeted at the player through `ai.setTarget` — the documented
+  // hand-activation hook (`src/ai/index.js`'s own header, "`setTarget`
+  // bypasses perception"), the same "reach a subsystem's real public
+  // surface from a dev shot" licence `ui.toggleSkillTree()` /
+  // `skills.allocate()` already take here. Measured on the headless run of
+  // exactly this sequence: **47 monsters across 6 packs activate, 24 sit
+  // within 25 m of the player, 17 within 18 m and 16 within 12 m**, and
+  // after the 200 pumped steps the anchor pack has closed from 2.38-3.98 m to 0.03-0.65 m — a real
+  // surrounded-by-a-swarm frame, which is what `dense_combat` is for
+  // (`06` §10.3's "10-25 on screen" and, later, FX-5's `readability.mjs`).
+  //
+  // HONEST LIMITS, all of them:
+  //  - Rendering: identical to `wastes_seed_a`/`b`'s — no `sky` subsystem
+  //    exists, so nothing lights a `MeshStandardMaterial` and every monster
+  //    and prop renders as a flat black silhouette; the green ground and
+  //    the pale capsule are `src/dev/debugview.js`'s unlit placeholders.
+  //  - Every pack in frame is a SINGLE archetype, not a mixed roster. That
+  //    is not this file's templates failing: `src/world/spawn.js` step 2
+  //    draws `PackDescriptor.archetypeId` uniformly from
+  //    `descriptor.bestiary` (bestiary ids), while `06` §5.1 specifies
+  //    `S3.weighted(bestiaryWeights(cell))` (template ids). Until `world`
+  //    draws template ids, `ai.spawnPack` correctly takes the §5.1 bestiary
+  //    branch — "a bestiary id spawns `count` identical monsters" — and no
+  //    mixed pack can appear in ANY frame. Reported by AI-7, not fixed
+  //    (`src/world/` is another subsystem's directory).
+  //  - No damage is exchanged: `combat` resolves hits, but nothing here
+  //    drives a player attack, so this is a converged-and-swinging frame,
+  //    not a mid-kill one.
+  //  - `steps: 200` is the convergence window measured above (the anchor
+  //    pack reaches contact well inside it) plus room for the orbit-locked
+  //    camera to settle, the same reasoning `inventory_full`'s `steps: 20`
+  //    documents.
+  dense_combat: {
+    id: 'dense_combat',
+    description: "Ashen Wastes, runIndex 18 (world seed 0, `world.seedFor('ashen_wastes',18)` = 0xb9a10dca) with AI-7's real zone:ready spawn pass: the player standing at the centre of the zone's largest pack while it and its neighbours converge. Measured headlessly on exactly this sequence: 9 packs / 68 monsters placed by world's WRLD-9 spawn plan, 6 packs / 47 monsters inside 06 §10.3's 34 m activation radius, 24 monsters within 25 m of the player, 17 within 18 m, 16 within 12 m, the 8-strong anchor pack (carrion_swarm) closed from 2.38-3.98 m to 0.03-0.65 m over the 200 pumped steps (each member really walked 1.93-3.94 m; measured at exactly step 200, not extrapolated). INCOMPLETE against 12-testing.md §9.1's own definition of this shot, deliberately and by scope: §9.1 asks for '22 monsters, 4 skill effects, 9 ground items'. The monster half is here (24 within 25 m). The other two thirds are NOT: no `fx` subsystem exists in this codebase at all (so no skill effect can be drawn), and nothing in this frame drops loot (no kill happens — see below), so there are 0 ground items. §9.1 also calls this 'the readability gate AND the performance gate' for readability.mjs/profile.mjs; as registered here it can serve neither yet. Whoever owns FX-5 and the loot half must extend THIS setup rather than register a second shot — 12 §9.3's own sanctioned 'a shot's setup grows, the name doesn't' pattern, the same way inventory_full grew in M4. KNOWN BLOCKER, read this before reading the pixels: AiSystem is NOT registered in src/main.js (boot()'s registry adds 12 systems and `ai` is not one of them; index.html passes no opts.systems), so nothing under src/ai/ runs in the real application at all — until one `registry.add(AiSystem)` line lands, this frame contains NO monsters and is simply the Ashen Wastes at a new seed. src/main.js is lead-owned and outside AI-7's grant; reported, not fixed. Same rendering caveats as wastes_seed_a/b, verbatim: no `sky` subsystem exists, so no light reaches any MeshStandardMaterial and every monster, prop and ridge renders as a flat black silhouette; the green ground plane and the pale capsule are src/dev/debugview.js's unlit MeshBasicMaterial placeholders, not this ticket's geometry. Every pack in frame is a SINGLE archetype rather than a mixed roster — src/world/spawn.js draws PackDescriptor.archetypeId uniformly from descriptor.bestiary (bestiary ids) where 06 §5.1 specifies S3.weighted(bestiaryWeights(cell)) (template ids), so ai.spawnPack correctly takes §5.1's 'a bestiary id spawns count identical monsters' branch and no mixed pack can appear in any frame yet; a world-side gap AI-7 reported and did not fix. No damage is exchanged in this frame: the pack is converged and swinging, nothing drives a player attack.",
+    milestone: 'M5',
+    steps: 200,
+    // Zero free variables — see this file's header, "pumpShot — AND a
+    // shot's own setup — must survive toString()+eval". Everything below is
+    // reached through the injected `ctx`; the inner `zone:ready` listener
+    // closes only over `setup`'s own parameter, the same pattern
+    // `skill_tree_ravager`'s own `makeItem` already uses.
+    setup: (engine, ctx) => {
+      const world = ctx.get('world');
+      if (!world) return;
+      world.requestZone('ashen_wastes', 'portal_from_town', { runIndex: 18 });
+      // `requestZone` only LATCHES; the real `enterZone` chain fires inside
+      // the engine's phase 4b on the first pumped frame. The player can only
+      // be moved onto a pack after that, so the rest hangs off `zone:ready`.
+      ctx.events.on('zone:ready', () => {
+        const ai = ctx.peek('ai');
+        const actors = ctx.peek('actors');
+        if (!ai || !actors || !ai._spawnStore) return; // see this entry's KNOWN BLOCKER
+        const player = actors.player;
+        const store = ai._spawnStore;
+        if (!player || store.count === 0) return;
+        let best = 0;
+        for (let s = 1; s < store.count; s++) {
+          if (store.memberCount[s] > store.memberCount[best]) best = s;
+        }
+        actors.teleport(player, store.centerX[best], store.centerZ[best]);
+        for (let i = 0; i < store.memberCount[best]; i++) {
+          const member = actors.byId(store.memberIds[store.memberStart[best] + i]);
+          if (member) ai.setTarget(member, player.id);
+        }
+      });
+    },
+  },
 };
 
 /** @returns {string[]} every registered shot name, sorted. */
