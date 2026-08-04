@@ -3237,7 +3237,14 @@ function renderJson(skillChecks, buildChecks, b7, meta) {
     warned: verdicts.filter((v) => v === 'warn').length,
     notes: verdicts.filter((v) => v === 'NOTE').length,
     skipped: verdicts.filter((v) => v === 'SKIP').length,
-    seconds: meta.seconds,
+    // No `seconds` field. `12-testing.md` §7's `12.D01` requires two runs at
+    // one seed to produce byte-identical `--json`, and a wall-clock field
+    // breaks that on every run rather than only occasionally: measured
+    // 0.358040584 against 0.349795375 on two consecutive runs, which is the
+    // ONLY difference between them. `--monsters` (TEST-9) already omits it for
+    // exactly this reason and says so; this is TEST-8's half, brought into
+    // line. The elapsed time is still printed in the human report, where no
+    // determinism rule applies.
   }, null, 2);
 }
 

@@ -423,10 +423,36 @@ export function createSummonEngine() {
   }
 
   /** @param {object} actor @param {number} step @returns {number} seconds */
+  /**
+   * Reads the arrays directly instead of going through `readUnity`, and the
+   * reason is measured rather than stylistic: `readUnity` writes
+   * `unityExpiresStep[idx]` — a genuine non-integer double — into
+   * `unityReadScratch.expiresStep`, a field whose map slot was created from
+   * the Smi `0`. Every such write boxes a HeapNumber, so this method
+   * allocated **exactly 16.0000 bytes per call**, rock-steady, against its
+   * contractual `Alloc: no` (`02-api-contracts.md` §10).
+   *
+   * That cost was invisible for a whole milestone because the probe measuring
+   * it retried at a larger N until the GC collected the boxes mid-loop and
+   * the retained-heap delta came back near zero (7.61 B/call at N=1e6 became
+   * 0.27 at N=8e6, and the higher reading was treated as the artifact). It is
+   * `tests/helpers/alloc.js#allocatedBytesNet` — a same-round baseline
+   * subtraction — that separated the two.
+   *
+   * `readUnity` is left exactly as it is: `hasUnity` and
+   * `appendUnityToBuffList` read `.level` (an integer, never boxed) and
+   * `appendUnityToBuffList` writes its double into a caller-owned `out` slot,
+   * so neither pays this. Only the seconds-returning path did.
+   */
   function unityRemaining(actor, step) {
-    const s = readUnity(actor);
-    if (s.level <= 0) return 0;
-    const remain = s.expiresStep - step;
+    const idx = actor.poolIndex;
+    if (idx >= capacity) return 0;
+    const stamp = unityStamp[idx];
+    const generation = Math.floor(stamp / GEN_SCALE);
+    if (generation !== actor.generation) return 0;
+    const level = stamp - generation * GEN_SCALE;
+    if (level <= 0) return 0;
+    const remain = unityExpiresStep[idx] - step;
     return remain > 0 ? remain / 60 : 0;
   }
 

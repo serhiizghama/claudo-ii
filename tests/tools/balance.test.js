@@ -155,20 +155,26 @@ test('balance.mjs --skills reproduces the three 05 §11 simulations within +-2% 
   assert.match(byId['SIM-Runeblade-resonance'], /16\.1/);
 });
 
-test('balance.mjs 12.D01 — two runs at one seed produce byte-identical JSON (hashed)', () => {
+test('balance.mjs 12.D01 — two runs at one seed produce byte-identical JSON (no field excluded first)', () => {
+  // This test used to `delete reportA.seconds` before hashing. That made it
+  // pass while `12` §7's actual requirement — "two runs at one seed produce
+  // byte-identical JSON" — was false on every run: the emitter carried a
+  // wall-clock `seconds` field, and two consecutive runs differed by exactly
+  // it (0.358040584 vs 0.349795375, measured). A test that deletes the field
+  // that breaks the criterion is not checking the criterion. The field is
+  // gone from `--skills --json` now (`--monsters` never had it), so this
+  // hashes the raw bytes, the same way the `--monsters` determinism test
+  // below already does.
   const args = ['--skills', '--seed=0x1234', '--json'];
   const a = run(args);
   const b = run(args);
   assert.equal(a.status, b.status);
+  assert.equal(sha256(a.stdout), sha256(b.stdout),
+    '12.D01: two --skills runs at one seed must hash identically, byte for byte');
 
-  const reportA = JSON.parse(a.stdout);
-  const reportB = JSON.parse(b.stdout);
-  delete reportA.seconds;
-  delete reportB.seconds;
-  const hashA = sha256(JSON.stringify(reportA));
-  const hashB = sha256(JSON.stringify(reportB));
-  assert.equal(hashA, hashB, '12.D01: two runs at the same seed must hash identically once the wall-clock field is excluded');
-  assert.deepEqual(reportA, reportB);
+  const report = JSON.parse(a.stdout);
+  assert.equal(report.seconds, undefined, 'no wall-clock field may re-enter the machine-readable report');
+  assert.deepEqual(JSON.parse(a.stdout), JSON.parse(b.stdout));
 });
 
 // ---------------------------------------------------------------------------
