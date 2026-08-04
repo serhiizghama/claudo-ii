@@ -100,18 +100,20 @@ test('balance.mjs --skills covers B1-B11 over the nine named builds plus a gener
     assert.ok(idsSeen.has(id), `assertion id '${id}' must appear in the per-build report`);
   }
 
-  // B10 is ruled unsatisfiable (D-54) — every occurrence must be a note, and
-  // notes are counted but must never change the exit code on their own.
+  // B10 was a permanent note under D-54 (unsatisfiable as written). D-85
+  // widened the assertion window to 12.0 s and gave it a real verdict — it
+  // must now be a normal pass/fail row, never a note, or the ruling has been
+  // silently rolled back.
   const b10 = report.perBuild.filter((c) => c.id === 'B10');
   assert.ok(b10.length > 0);
-  assert.ok(b10.every((c) => c.status === 'note'), 'B10 must always report as a note (D-54), never pass/fail');
-  assert.ok(report.notes >= b10.length, 'the summary must count B10\'s own notes');
+  assert.ok(b10.every((c) => c.status === 'pass' || c.status === 'fail' || c.status === 'skip'), 'B10 must be a real verdict since D-85, never a note');
+  assert.ok(b10.some((c) => c.status === 'pass'), 'B10 must actually be evaluated, not skipped away');
 
   const expectExit = report.failed > 0 ? 1 : 0;
   assert.equal(r.status, expectExit);
 });
 
-test('balance.mjs --skills exits 0 — the M4 gate: S1-S12 green, 05.B08 green, B6/B7/B10 present as notes only', () => {
+test('balance.mjs --skills exits 0 — the M4 gate: S1-S12 green, 05.B08 green, B10 green under D-85, B6/B7 present as notes only', () => {
   const r = run(['--skills', '--json']);
   const report = JSON.parse(r.stdout);
   assert.equal(report.failed, 0, 'M4 gate: the run must have zero fail-severity checks');
@@ -161,4 +163,64 @@ test('balance.mjs 12.D01 — two runs at one seed produce byte-identical JSON (h
   const hashB = sha256(JSON.stringify(reportB));
   assert.equal(hashA, hashB, '12.D01: two runs at the same seed must hash identically once the wall-clock field is excluded');
   assert.deepEqual(reportA, reportB);
+});
+
+// ---------------------------------------------------------------------------
+// D-85 — B10's arithmetic, locked independently of the harness
+// ---------------------------------------------------------------------------
+// Drives `rollDrChain` (the SHIPPED mechanism, `src/combat/status.js`) rather
+// than balance.mjs's copy of the simulation, so a future edit to either one
+// cannot quietly diverge from the owner ruling. Three things are pinned:
+// the §12.7 chain itself, that the OLD 6.0 s window really was unsatisfiable
+// (D-54 was right about the fact, wrong about which number to blame), and
+// that the new 12.0 s window still fails a stun long enough to deserve it.
+test('D-85 — B10 at a 12.0 s window: the DR chain passes, the old 6.0 s window does not, and the assert still bites', async () => {
+  const { rollDrChain } = await import('../../src/combat/status.js');
+  const HZ = 60;
+
+  function worstWindow(stun, cooldown, windowSeconds, timelineSeconds = 60) {
+    const totalSteps = Math.round(timelineSeconds * HZ);
+    const windowSteps = Math.round(windowSeconds * HZ);
+    const actor = { stunChain: 0, stunChainAt: 0, ccImmuneUntil: 0 };
+    const denied = new Uint8Array(totalSteps);
+    const applied = [];
+    let nextCast = 0;
+    let until = 0;
+    for (let step = 0; step < totalSteps; step++) {
+      if (step >= nextCast) {
+        nextCast = step + Math.round(cooldown * HZ);
+        const roll = rollDrChain(actor, step);
+        if (roll.allowed) {
+          const d = stun * roll.multiplier;
+          applied.push(Number(d.toFixed(2)));
+          const u = step + Math.round(d * HZ);
+          if (u > until) until = u;
+        }
+      }
+      if (step < until) denied[step] = 1;
+    }
+    let run = 0;
+    for (let i = 0; i < windowSteps; i++) run += denied[i];
+    let worst = run;
+    for (let step = windowSteps; step < totalSteps; step++) {
+      run += denied[step] - denied[step - windowSteps];
+      if (run > worst) worst = run;
+    }
+    return { fraction: worst / windowSteps, applied };
+  }
+
+  // `ram_charge` at slvl 20 — `05` §12.7's own skill: stun
+  // min(2.5, 1.5 + 0.05x19) = 2.45 s, cooldown max(4.0, 8.0 - 0.20x19) = 4.2 s.
+  const twelve = worstWindow(2.45, 4.2, 12.0);
+  const six = worstWindow(2.45, 4.2, 6.0);
+
+  // §12.7's printed chain, to the same two decimals it prints.
+  assert.deepEqual(twelve.applied.slice(0, 4), [2.45, 1.47, 0.88, 0.53]);
+
+  assert.ok(six.fraction > 0.60, `D-54's finding must still reproduce: the 6.0 s window gives ${(six.fraction * 100).toFixed(1)}%, over the 60% ceiling`);
+  assert.ok(twelve.fraction <= 0.60, `D-85: the 12.0 s window must pass, got ${(twelve.fraction * 100).toFixed(1)}%`);
+
+  // Not vacuous: a 4.0 s-base stun on the same cooldown must still fail.
+  const big = worstWindow(4.0, 4.2, 12.0);
+  assert.ok(big.fraction > 0.60, `B10 must still bite: a 4.0 s stun scored only ${(big.fraction * 100).toFixed(1)}%`);
 });

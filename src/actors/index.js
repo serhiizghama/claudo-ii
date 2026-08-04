@@ -736,6 +736,18 @@ export class ActorsSystem {
       actor.stateTime += h;
       if (actor.state === ACTOR_STATE.spawning && actor.stateTime >= SPAWNING_STATE_SECONDS) {
         setStatePure(actor, ACTOR_STATE.idle);
+      } else if (actor.state === ACTOR_STATE.hitstun && step >= actor.hitstunUntil) {
+        // O-94 cause 4 — `hitstun` had no exit. `reaction.js` (R14(g)) wrote
+        // `hitstunUntil` and nothing ever read it, so one qualifying hit
+        // parked an actor in `hitstun` permanently: measured 3383 of 3600
+        // steps (94%) on a melee class against a five-monster room, where
+        // `03` §7.11's own duration + immunity arithmetic caps it at 44%.
+        // `data/states.js` already contracts the edge ("duration-gated
+        // states ... release back to `idle` when their timer elapses, never
+        // straight to `move`"); `skills/channel.js` flagged the missing
+        // half in prose. This is the same shape as the `spawning` release
+        // directly above it, against the clock `03` §7.11 schedules on.
+        setStatePure(actor, ACTOR_STATE.idle);
       }
     }
   }

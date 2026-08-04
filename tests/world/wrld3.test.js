@@ -191,13 +191,24 @@ test('O-38: on a zone CHANGE, nav.rebuild reflects the NEW zone, not the previou
 
   assert.equal(nav.grid.width, 224, 'grid must resize to bonereach, not stay at last_bastion\'s 120');
   assert.equal(nav.grid.height, 224);
-  // (50, 0) sits OUTSIDE last_bastion's +-30 m bounds but well inside
-  // bonereach's +-56 m bounds, far from any wall's dilation. Walkable only
-  // if nav is reading bonereach's real geometry — under the pre-fix bug
-  // (nav.rebuild() called with no argument, falling back to the STALE
-  // `world.current`, still last_bastion at that point) this point would be
-  // off last_bastion's 120x120 grid entirely and read as unwalkable.
-  assert.equal(nav.walkable(50, 0), true);
+  // WRLD-7 note: this used to probe a hardcoded (50, 0) — a safe pick back
+  // when `bonereach` was boundary-walls-and-open-floor (any interior point
+  // was walkable). With a real BSP hall generator, (50, 0) is ordinary solid
+  // rock outside every room/corridor (`gen/bonereach.js`'s own "rock"
+  // footprint model blocks everything that is not a generated room or
+  // corridor) — a hardcoded coordinate a future generator can invalidate
+  // again, exactly as this one did. `world.entry('descent')` is walkable by
+  // CONSTRUCTION instead: B10 places it 2.5 m inside the entry room's own
+  // south wall, so it is real, seed-derived, always-inside-bonereach's-own-
+  // walkable-area — the actual point a player would stand on, not a
+  // coordinate that happens to work today. Still proves the same thing this
+  // test is about: this position only makes sense under bonereach's OWN
+  // geometry (well outside last_bastion's own +-30 m bounds), so it can only
+  // read walkable if nav is rasterising the zone just entered, not the stale
+  // previous one.
+  const descent = world.entry('descent');
+  assert.ok(Math.abs(descent.x) > 30 || Math.abs(descent.z) > 30, 'sanity: the descent point must fall outside last_bastion\'s own bounds');
+  assert.equal(nav.walkable(descent.x, descent.z), true);
 });
 
 test('O-38: instance.navVersion is mirrored by nav.rebuild, and zone:ready carries that same real value', async () => {

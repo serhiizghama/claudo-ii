@@ -643,13 +643,35 @@ function main() {
   // full sweep would still walk into and fail on the very files this entry
   // exists to exempt, before this entry's own (correct) rule ever ran.
   const archetypesDir = join(srcRoot, 'actors', 'archetypes');
+  // `src/world/build/` (D-78, WRLD-6): `07-world-gen.md` §7.2 says outright
+  // that "`src/world/build/*.js`, which is the only part that touches
+  // `three`, is never imported" by the headless map-gen harness
+  // (`tools/mapgen.mjs`) — and §12's steps 3/6/9/10 all name
+  // `src/world/build/{town,wastes,bonereach,altar}.js` as real deliverables
+  // that build `InstancedMesh`es from the pure `src/world/gen/*.js` plan.
+  // The spec requires a `three`-legal directory inside `world`'s own
+  // ownership and the `world` root's blanket `checkThree: true` (O-29, this
+  // file's own header) forbids one existing anywhere under it — a genuine
+  // contradiction between two rules this tool enforces, not a bug in either
+  // one read alone. Resolved exactly like `src/actors/archetypes/` (D-13,
+  // directly above): the strict parent (`world`) EXCLUDES the subdirectory,
+  // and the subdirectory becomes its OWN narrower root, `checkThree: false`
+  // (three is legal) but `checkGlobals: true` (still no `document`/`window`/
+  // `performance.now()` — `build/` consumes a plain-data plan and touches
+  // `ctx.scene`/`materials`, it has no legitimate reason to reach a DOM
+  // global or a wall-clock read). `src/world/gen/` is untouched by this
+  // carve-out and stays exactly as strict as before — it is still the
+  // headless half `tools/mapgen.mjs` actually imports, which is the whole
+  // point D-72/D-65 already established and this entry does not reopen.
+  const worldBuildDir = join(srcRoot, 'world', 'build');
   const declaredRoots = [
     { path: join(srcRoot, 'combat'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'items'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'skills'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'nav'), checkThree: true, checkGlobals: true },
     { path: join(srcRoot, 'world', 'data'), checkThree: true, checkGlobals: true },
-    { path: join(srcRoot, 'world'), checkThree: true, checkGlobals: true },
+    { path: join(srcRoot, 'world'), checkThree: true, checkGlobals: true, exclude: [worldBuildDir] },
+    { path: worldBuildDir, checkThree: false, checkGlobals: true },
     { path: join(srcRoot, 'core'), checkThree: true, checkGlobals: false },
     { path: join(srcRoot, 'physics'), checkThree: true, checkGlobals: false },
     { path: join(srcRoot, 'actors'), checkThree: true, checkGlobals: true, exclude: [archetypesDir] },

@@ -369,6 +369,23 @@ test('phase_leap: always lands on the target\'s far side, and the strike resolve
   const targetStats = actors.stats(target);
   target.life = targetStats.maxLife;
 
+  // ACTR-24 gave a bone_ranker's `defense`/`attackRating` real, nonzero
+  // values for the first time (both were 0 before — the defect that ticket
+  // closed). The strike is a real weapon hit going through combat's R2
+  // to-hit roll (`03` §5.1), which clamps to [5,95] — never a guaranteed
+  // hit, and this file's shared, fixed-seed RNG stream is order-sensitive
+  // (an earlier test's own resolve() now draws one extra roll now that a
+  // monster target has real stats, shifting this test's own single R2 draw
+  // onto what happens to be its 5% miss band). This test's actual subject
+  // is SCHEDULING — "the strike resolves on the next fixed step, not
+  // synchronously inside cast()" — not whether the roll hits, so it now
+  // asserts the `combat:hit-request` itself (fired when, from/at whom),
+  // never `target.life`, which depends on an outcome this pipeline never
+  // guarantees.
+  const hitRequests = [];
+  const onHitRequest = (p) => hitRequests.push({ source: p.source, target: p.target });
+  ctx.events.on('combat:hit-request', onHitRequest);
+
   console.log(`[phase_leap] caster=(${caster.x},${caster.z}) target=(${target.x},${target.z})`);
   const ok = skills.cast(caster, 'phase_leap', 5, z, target.id);
   assert.equal(ok, true);
@@ -378,11 +395,14 @@ test('phase_leap: always lands on the target\'s far side, and the strike resolve
   // target along +x.
   assert.ok(caster.x > target.x, `arrival must be on the target's far side (x > ${target.x}), got x=${caster.x}`);
 
-  // Not resolved yet — the strike is scheduled for the NEXT fixed step.
-  assert.equal(target.life, targetStats.maxLife, 'the strike must not resolve synchronously inside cast()');
+  // Not resolved yet — the strike must not fire synchronously inside cast().
+  assert.equal(hitRequests.length, 0, 'the strike must not resolve synchronously inside cast()');
 
   tick();
-  assert.ok(target.life < targetStats.maxLife, 'the strike must resolve on the next fixed step');
+  ctx.events.off('combat:hit-request', onHitRequest);
+  assert.equal(hitRequests.length, 1, 'the strike must resolve on the next fixed step — exactly one combat:hit-request, not zero and not more than one');
+  assert.equal(hitRequests[0].source, caster, 'the hit-request must be sourced from the caster');
+  assert.equal(hitRequests[0].target, target, 'the hit-request must be aimed at the intended target — correctly aimed, not just "some" strike');
 });
 
 test('phase_leap: refuses beyond its 10 m range without moving or spending', () => {

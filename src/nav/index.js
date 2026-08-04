@@ -41,6 +41,15 @@
 // rule, the `maxRadius===0` fast path, and why region is deliberately not
 // filtered here.
 //
+// NAV-7 (D-74) addendum: `raycastNav` is added below — a direct forward
+// into `./smooth.js`'s already-exported `segmentWalkable`, not a new
+// algorithm. `smooth.js`'s own NAV-3 header built that function private-but-
+// exported for exactly this — see its "Segment-walkability test — option
+// (a)" section — so this ticket is the "later ticket" it names, importing
+// rather than re-deriving the same line-of-walk rule (the O-32/O-35 defect
+// class). `player/move.js`'s and `ai/perception.js`'s existing `typeof
+// nav.raycastNav === 'function'` guards light up with no edit on their side.
+//
 // ---------------------------------------------------------------------------
 // Imports — `raster.js` reached only through `./grid.js`
 // ---------------------------------------------------------------------------
@@ -84,7 +93,7 @@ import {
   markHazard as gridMarkHazard,
 } from './grid.js';
 import { AStarScheduler } from './astar.js';
-import { smoothPath } from './smooth.js';
+import { smoothPath, segmentWalkable } from './smooth.js';
 import { FlowField } from './flow.js';
 import { snapPoint } from './snap.js';
 
@@ -535,6 +544,19 @@ export class NavSystem {
   /** `02-api-contracts.md` §6: `setBudget(pathsPerStep) => void`, default 4. */
   setBudget(pathsPerStep) {
     this._astar.setBudget(pathsPerStep);
+  }
+
+  /** `02-api-contracts.md` §6: `raycastNav(ax,az,bx,bz) => boolean` —
+   * "grid-space line of walk". `Fixed: Y`, `Alloc: no`. NAV-7 (D-74): this
+   * is a direct forward into `./smooth.js`'s `segmentWalkable` — the exact
+   * same supercover-DDA-with-corner-tie-check that file's NAV-3 header
+   * always said a later `raycastNav` ticket should reuse rather than
+   * re-derive (see that file's own header, "Segment-walkability test —
+   * option (a)"). No new algorithm here; `player/move.js`'s and
+   * `ai/perception.js`'s `typeof nav.raycastNav === 'function'` guards pick
+   * this up with no edit on their side. */
+  raycastNav(ax, az, bx, bz) {
+    return segmentWalkable(this._grid, ax, az, bx, bz);
   }
 
   /** `02-api-contracts.md` §6: `smooth(path) => void` — string-pull in

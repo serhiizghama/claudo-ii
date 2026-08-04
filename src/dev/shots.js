@@ -802,6 +802,106 @@ export const SHOTS = {
       }
     },
   },
+
+  // WRLD-6 (D-69) — `12 §9.1` assigns these two to M5 and `12:625` requires
+  // them in the baseline; no backlog row owned them until D-69 granted them
+  // here. Two seeds of the same generator (Ashen Wastes, `runIndex` 0 and 8
+  // — `world.seedFor` hashes each into a different `Rng` seed) is what
+  // proves the generator, not one lucky frame — picked by actually running
+  // both headlessly first (`generateRidgewalkLayout`) and comparing: seed A
+  // is 10/16 connected macro cells (entry cell 2, exit cell 12, a ravine
+  // present); seed B is 14/16 connected (entry cell 3, exit cell 12, also a
+  // ravine, but a visibly denser, more sprawling layout) — genuinely
+  // different cell counts and entry points, not two near-identical rolls.
+  //
+  // `world.requestZone` is called directly here (not through `player`'s
+  // `fixedUpdate`, the only path `02-api-contracts.md` names for it) —
+  // every other dev shot in this file already reaches straight into a
+  // subsystem's public surface (`ui.toggleSkillTree()`, `skills.allocate()`)
+  // rather than simulating a full player-driven flow, and `requestZone`
+  // is a real, public, `Fixed:Y` method on `world` (O-71) — there is
+  // nothing player-specific about calling it from a shot's own `setup`.
+  // `steps: 3` (not `1`): `requestZone` only LATCHES here, before any frame
+  // has run; the real `enterZone` chain (T5->T8->T9->T12, including this
+  // ticket's own T7 geometry build) fires inside the ENGINE's phase 4b, on
+  // the first pumped frame — three steps gives the orbit-locked camera
+  // (`player`'s per-frame follow) a little room to settle onto the
+  // teleported player before the pixels are read, the same reasoning
+  // `inventory_full`'s own `steps: 20` documents for its own settle window,
+  // scaled down here since nothing here animates a UI transition.
+  wastes_seed_a: {
+    id: 'wastes_seed_a',
+    description: "Ashen Wastes, runIndex 0 (world seed 0xc7a123d4): a 10-of-16 connected macro-cell layout with a ravine, viewed from the player's spawn point after `enterZone` (T6 layout, this ticket's own R8 dressing + R9 boundary, T7 geometry, T8 physics, T9 nav — O-99's real `nav.groundY` — all real, not stubbed). The frame shows the dressed ground cell the player lands on (ash_flats, forced by A1) and whatever neighbouring cells/props/ridge-wall silhouette fall inside the fixed 3/4 camera's frustum from that one spawn position — it does NOT show the ravine, the exit stair, or the full 96x96 m zone (the camera never frames the whole zone, by design — `docs/ARCHITECTURE.md`'s fixed orbit rig). Prop geometry is this ticket's own placeholder primitive shapes (a scaled box per prototype — see `src/world/build/wastes.js`'s header): real per-prototype mesh art is a separate, later ticket's scope, not built here. Every prop renders as a flat black silhouette because no light illuminates a `MeshStandardMaterial` yet: `sky` (the subsystem that would add a directional sun) does not exist in this codebase and this ticket does not stub it (its own binding instruction). The green backdrop and the pale capsule are NOT this ticket's geometry at all — they are `src/dev/debugview.js`'s (PLYR-1) own TEMPORARY, unlit `MeshBasicMaterial` placeholder ground plane and player capsule, still resident in `ctx.scene` because this shot's `setup` does not clear it the way `ui_clean`'s does; this ticket builds no ground-tile mesh of its own (out of scope — WRLD-6 is props/boundary, not the ground surface kit), so without `debugview.js`'s placeholder the frame would show only the black props on the bare clear colour. Read the black shapes as this ticket's real, seeded R8/R9 output; read the green ground and the capsule as pre-existing dev scaffolding this ticket did not touch. HONEST LIMIT (coordinator round 2): this frame does NOT read as evidence of a different MAP SHAPE — only of different LOCAL DRESSING. The entry cell is always ash_flats (A1, forced, identical archetype in every seed), the camera never frames enough of the zone to show macro layout (spine/branches/other archetypes), and every prop here (ash_flats draws only from G2's 4 rubble prototypes) is an unlit black silhouette with no colour/texture cue to distinguish prototypes from one another. What genuinely differs between this frame and `wastes_seed_b`'s is dressing DENSITY and ARRANGEMENT near the same kind of spawn point (measured: 486 vs. 638 placed props, 10 vs. 14 connected cells) — real, seed-driven variation, but a narrower claim than 'two different maps'.",
+    milestone: 'M5',
+    steps: 3,
+    setup: (engine, ctx) => {
+      const world = ctx.get('world');
+      if (!world) return;
+      world.requestZone('ashen_wastes', 'portal_from_town', { runIndex: 0 });
+    },
+  },
+
+  wastes_seed_b: {
+    id: 'wastes_seed_b',
+    description: "Ashen Wastes, runIndex 8 (world seed 0xbfa1173c): a denser 14-of-16 connected macro-cell layout with a different entry cell (3, vs. seed A's 2) and a ravine, viewed from the player's spawn point the same way `wastes_seed_a` is — see that entry's own description for what is and is not in frame (this shot shows a different spawn cell's own dressing, still only the local camera frustum, never the whole zone; same placeholder prop geometry, same real T6-T9 pipeline, same lighting caveat — see that entry's own note on the black silhouettes / `debugview.js`'s placeholder ground+capsule, all identical here). Comparing this frame against `wastes_seed_a` shows a visibly denser cluster concentrated toward one side here versus clutter spread across most of the frame there — a real, seed-driven difference in dressing density/arrangement (measured: 638 vs. 486 placed props). HONEST LIMIT, same as `wastes_seed_a`'s own note: this is NOT evidence the two seeds produce different macro MAP shapes — both spawn on the same forced ash_flats archetype (A1), the camera never frames enough of the zone to show the spine/branches/other archetypes, and nothing here distinguishes prototype from prototype visually (no light, no colour). The proof that the generator varies structurally is programmatic (connected-cell count 10 vs. 14, different entry cell 2 vs. 3, different archetype mix — see this ticket's test suite), not this pixel frame alone.",
+    milestone: 'M5',
+    steps: 3,
+    setup: (engine, ctx) => {
+      const world = ctx.get('world');
+      if (!world) return;
+      world.requestZone('ashen_wastes', 'portal_from_town', { runIndex: 8 });
+    },
+  },
+
+  // WRLD-7 — one of `12-testing.md` §9.1's twelve pinned shots (the M5 row
+  // this milestone's own backlog assigns to Bonereach), granted by this
+  // ticket's own brief ("exactly one shot — bonereach_hall").
+  //
+  // ---------------------------------------------------------------------
+  // Why runIndex 15, not 0 — a real, checked constraint, not an arbitrary pick
+  // ---------------------------------------------------------------------
+  // The camera follows the PLAYER, and nothing in this codebase repositions
+  // the player to a zone's own `entry()` point on a zone change — checked
+  // directly: `src/player/index.js` has no `zone:ready`/`zone:enter`
+  // listener at all (grep confirms). `wastes_seed_a`/`b` get away with this
+  // because the player's own placeholder spawn (world origin, 0,0) happens
+  // to sit inside Ashen Wastes' own walkable area regardless. For
+  // Bonereach, world origin (0,0) is a fixed point relative to the ROOT
+  // rectangle and can land ANYWHERE relative to a given seed's own rooms —
+  // inside a room, grazing a wall, or inside solid rock outright. Checked
+  // headlessly across `runIndex` 0-19 (`world.seedFor('bonereach',
+  // runIndex)`, world seed 0): most land in rock or within 1 m of a wall;
+  // `runIndex 15` (seed 0x197a99d5) is the best of that sample — origin
+  // sits 3.0 m clear of every wall, inside room 10 (21x18 m, `centre:
+  // {x:6,z:6}`), a real dressed hall interior rather than a wall closeup or
+  // a black screen. This is disclosed, not hidden: this shot's own camera
+  // position is a happy accident of where the placeholder player already
+  // is, not a deliberate `descent`-entry framing — a future ticket wiring
+  // player-to-entry repositioning on zone change would let this (and every
+  // other zone's own shot) actually frame the real entry point.
+  //
+  // 14 rooms this seed (17 requested — see this ticket's own report for
+  // how often requested and achieved diverge across the 600-layout sweep,
+  // a proven mathematical ceiling in 07 §4.2 B2's own numbers, not a bug),
+  // 14 corridors (13 tree + 1 loop), entry room 1, stair room 13, two vault
+  // rooms (6, 9), no flooded room this seed.
+  //
+  // `steps: 3` — same reasoning as `wastes_seed_a`/`b`'s own entries:
+  // `requestZone` only LATCHES here; the real `enterZone` chain (including
+  // this ticket's own T7 geometry build) fires on the engine's next pumped
+  // frame, and a few more steps let the orbit-locked camera settle before
+  // the pixels are read.
+  bonereach_hall: {
+    id: 'bonereach_hall',
+    description: "Bonereach, runIndex 15 (world seed 0, `world.seedFor('bonereach',15)` = 0x197a99d5): a real 14-room BSP hall (17 requested, 14 achieved this seed — see this ticket's own report for the proven B2 ceiling that makes 17/18 unreachable and 12-16 the realistic range), 14 corridors (13 tree-spanning + 1 loop edge), after a real `enterZone` (T6 layout — B1-B8/B10, this ticket's own generator — T7 geometry: room floors/walls/ceilings, corridor floor slabs, the stair room's 6-step ramp, instanced B9 dressing props — T8 physics, T9 nav, all real, not stubbed). The camera follows the player, which nothing repositions to the zone's own `descent` entry on a zone change (a real, pre-existing gap — see this entry's own header comment, 'Why runIndex 15, not 0'); at the player's own placeholder spawn (world origin), this seed lands cleanly inside room 10 (21x18 m), 3 m clear of every wall — the frame shows that room's own dressed floor/walls/ceiling and whatever else falls inside the fixed 3/4 camera's frustum from that one point. It does NOT show the entry room, the stair room, the ramp/shaft, the vault rooms, or the whole 112x112 m zone (the camera never frames the whole zone, by design). Every wall/floor/ceiling/prop renders as a flat BLACK silhouette, camouflaged against the renderer's own black clear colour — the exact same, already-documented reason `wastes_seed_a`/`b` render their own props black: `materials.get()` (this ticket's own `build/bonereach.js`, same as `build/wastes.js`) returns a real `THREE.MeshStandardMaterial`, and no directional light exists anywhere in this codebase yet (`sky`, the subsystem that would add one, is unbuilt) — a PBR material with zero incident light renders pure black regardless of its own tint. What IS visible (the green wedges) is `src/dev/debugview.js`'s own pre-existing placeholder ground plane — deliberately `MeshBasicMaterial` (unlit, so it stays visible without a light source) — showing through wherever this ticket's own (real, present, but black-on-black) geometry does not cover it; read the black shapes as this ticket's own real T7 output and the green as pre-existing dev scaffolding this ticket did not touch, same as `wastes_seed_a`'s own note. HONEST LIMIT: nav/physics blocking for this zone comes from `gen/bonereach.js#toFootprints`'s own 'rock' footprints (root-rectangle-minus-rooms-minus-corridors), NOT from the visual room walls this frame shows — see that file's header for why (`src/nav/index.js#rebuild()` does not forward GroundRegions from any zone, a real, disclosed pre-existing gap this ticket found, not introduced).",
+    milestone: 'M5',
+    steps: 3,
+    setup: (engine, ctx) => {
+      const world = ctx.get('world');
+      if (!world) return;
+      world.requestZone('bonereach', 'descent', { runIndex: 15 });
+    },
+  },
 };
 
 /** @returns {string[]} every registered shot name, sorted. */

@@ -3826,7 +3826,19 @@ total **5.33 s of stun across 4 applications and a 6 s window**, then immunity.
 Molgrim takes ×0.25 on top, so the same chain yields 1.33 s in total.
 
 **Assertion.** No actor is ever unable to act for more than 60 % of any rolling
-6.0 s window, boss included.
+**12.0 s** window, boss included.
+
+> **Owner ruling D-85 (2026-08-04) — the window is 12.0 s, not 6.0 s.**
+> The 6.0 s form contradicted the worked chain three lines above it: 5.33 s
+> inside a 6.0 s window is 88.8 %, and `ram_charge` alone at slvl 20 (2.45 s
+> stun, 4.2 s cooldown, two casts inside the window) already reaches 65.3 %.
+> The DR chain of `03` §7.7 is binding per §1.1, so the threshold was the
+> outlier, not the mechanism. 12.0 s is the chain's own natural period — four
+> applications plus the 6.0 s immunity the fifth forces — so the assertion now
+> measures what the lock actually promises: **crowd control cannot be
+> permanent**. The chain's worst case scores 5.33 / 12.0 = 44.4 % and passes;
+> a hypothetical 4 s-base stun would score 72 % and still fail. The 60 %
+> threshold and every multiplier in `03` §7.7 are unchanged.
 
 ---
 
@@ -3867,7 +3879,7 @@ first.
 | B7 | Sustained DPS spread from the median of all builds in the sweep | `< 2.0×` — **the M7 gate** |
 | B8 | Resource never goes negative, and the burst window is `≥ 8 s` from a full bar | exact / threshold |
 | B9 | Resonance overflow over 60 s, for builds where `maxResonance ≥ blade_seal`'s imbue count | `< 30 %` of generated. Mispaired and sinkless builds are **reported**, not failed (§12.5) |
-| B10 | No rolling 6.0 s window in which a monster is unable to act for more than 60 % | threshold |
+| B10 | No rolling **12.0 s** window in which a monster is unable to act for more than 60 % (window widened by D-85; §12.7 carries the arithmetic) | threshold |
 | B11 | Two runs at the same seed produce byte-identical output | exact |
 
 The sweep is every allocation that puts ≥ 15 points into one skill and

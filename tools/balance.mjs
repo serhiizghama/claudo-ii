@@ -48,19 +48,26 @@
 // explicit instruction; asserting 45.3 would fail on correct code.
 //
 // ---------------------------------------------------------------------------
-// Ruling D-54 — `B10` is unsatisfiable as written; NOTE, never pass/fail
+// Ruling D-54, superseded by D-85 — `B10` is a real verdict again
 // ---------------------------------------------------------------------------
-// `05` §12.7's own worked chain (`2.45 + 1.47 + 0.88 + 0.53 = 5.33 s` inside
-// the very 6.0 s window it names) is **88.8%** uptime-denial — already past
-// the stated 60% threshold — and even `ram_charge` ALONE at L20 (2.45 s
-// stun, 4.2 s cooldown, two casts fit in 6 s) is **65.33%**. The DR-chain
-// mechanism (`03` §7.7, binding per `05` §1.1) is not in question; the 60%
-// THRESHOLD is the outlier. `B10` below always reports `NOTE` — never a
-// `pass`/`fail` verdict, never a change to the exit code — carrying the
-// measured worst-window fraction and the arithmetic, so the owner can pick a
-// real threshold. This is `B9`'s own precedent (`05` §12.5: mispaired/
-// sinkless builds are "reported, not failed") extended to a case where NO
-// threshold in the document is satisfiable, not just some builds.
+// D-54 (2026-08-01) found `B10` unsatisfiable as written and made it a
+// permanent `NOTE`: `05` §12.7's own worked chain (`2.45 + 1.47 + 0.88 +
+// 0.53 = 5.33 s` inside the very 6.0 s window it named) is **88.8%**
+// denial — already past the stated 60% ceiling — and `ram_charge` ALONE at
+// L20 (2.45 s stun, 4.2 s cooldown, two casts fit in 6 s) reached
+// **65.33%**. The DR-chain mechanism (`03` §7.7, binding per `05` §1.1) was
+// never in question; the WINDOW was the outlier.
+//
+// D-85 (2026-08-04, owner) settles it: the assertion window widens 6.0 s ->
+// **12.0 s**, the 60% ceiling and every §7.7 multiplier stay exactly as
+// written. 12.0 s is the chain's own period — four applications plus the
+// 6.0 s immunity the fifth forces — so `B10` now measures what the lock
+// actually promises, that crowd control cannot be PERMANENT. §12.7's chain
+// scores 5.33 / 12.0 = 44.4% and passes; a 4 s-base stun would score 72%
+// and still fail. `checkB10` below is a normal `fail`-severity check again
+// and its model was rebuilt at the same time (see its own header — the
+// D-54-era version chained per skill instead of per actor and summed
+// overlapping stuns, both of which over-reported).
 //
 // ---------------------------------------------------------------------------
 // The four habits carried over from `tools/lootsim.mjs` (per the brief)
@@ -78,8 +85,9 @@
 //    that check's own comment for why (no `audio` field exists anywhere on
 //    `SkillDefinition`, and no `src/fx/` registry exists yet to resolve
 //    `fxId` against).
-// 3. `NOTE`-severity findings (`B9`'s mispaired/sinkless builds, `B10`
-//    always) are counted in the summary and NEVER flip the exit code — `05`
+// 3. `NOTE`-severity findings (`B9`'s mispaired/sinkless builds, `B6`'s
+//    out-of-scope Molgrim rows) are counted in the summary and NEVER flip
+//    the exit code — `05`
 //    §13.3's own closing line, restated in `12` §5.2's "Notes versus
 //    failures" section almost verbatim.
 // 4. The in-suite test (`tests/tools/balance.test.js`) is a THIN `spawnSync`
@@ -167,6 +175,7 @@ import {
 } from '../src/combat/resolve.js';
 import {
   DR_CHAIN_MULTIPLIERS, DR_CHAIN_WINDOW_SECONDS, DR_CHAIN_IMMUNITY_SECONDS,
+  rollDrChain,
 } from '../src/combat/status.js';
 import { FIELD_NAMES as STAT_FIELD_NAMES, CAPS as STAT_CAPS } from '../src/actors/stats.js';
 import { STATUS, STATUS_TABLE } from '../src/actors/data/statuses.js';
@@ -178,6 +187,21 @@ import { STATUS, STATUS_TABLE } from '../src/actors/data/statuses.js';
 // same table (`activeFrac`/the remainder rule are shared between both rows
 // per that table's own text — only `windupFrac` differs).
 const CAST_WINDUP_FRAC = 0.65;
+
+// B10's measurement window — owner ruling D-85 (2026-08-04). Distinct from
+// the MECHANISM's `DR_CHAIN_WINDOW_SECONDS` (6.0 s, imported and unchanged):
+// this is the window the ASSERTION rolls, widened to 12.0 s because that is
+// the chain's own natural period (four applications, then the 6.0 s immunity
+// the fifth forces). The 60 % ceiling is `05` §13.2's, untouched.
+const B10_WINDOW_SECONDS = 12.0;
+const B10_MAX_DENIAL = 0.60;
+// Long enough to contain a full chain + immunity + the start of the next
+// chain, so the rolling window sees the worst straddle, not just t=0.
+const B10_TIMELINE_SECONDS = 60.0;
+// `rollDrChain` schedules in `ctx.time.step`. `FIXED_HZ` is module-private in
+// `src/combat/status.js`; transcribed here from `ARCHITECTURE.md`'s
+// engine-owned `PHYSICS_HZ = 60`, the same way `CAST_WINDUP_FRAC` above is.
+const FIXED_HZ = 60;
 const CAST_ACTIVE_FRAC = ACTIVE_FRAC; // 0.15, shared
 const CAST_RECOVER_FRAC = 1 - CAST_WINDUP_FRAC - CAST_ACTIVE_FRAC; // 0.20
 
@@ -1399,14 +1423,37 @@ function checkB9(build) {
   return { pass: true, lines: [`imbue ${imbueCount} <= maxResonance ${maxResonance} — 0% overflow in steady state (05 §12.5's own table)`] };
 }
 
-/** B10 — always a NOTE, per D-54. Measures the worst 6.0s-window
- * stun-denial fraction from the build's own stun-capable skills (ram_charge/
- * war_cry), using the imported DR-chain constants directly. */
+/** B10 — a real pass/fail since owner ruling D-85 (2026-08-04) replaced the
+ * unsatisfiable 6.0 s assertion window with 12.0 s. Simulates the build's
+ * stun-capable skills against one monster at 60 Hz and rolls a 12.0 s window
+ * over the resulting denial timeline.
+ *
+ * Two things this models that the D-54-era version did not, both of which it
+ * got wrong in the same direction (over-reporting):
+ *
+ * 1. **One chain per ACTOR, not per skill.** `03` §7.7 chains "successive
+ *    stuns on the same actor"; the old code ran a private chain per skill and
+ *    summed the totals, so a `ram_charge` + `war_cry` build reported past
+ *    100 %. `rollDrChain` itself is imported from `src/combat/status.js` and
+ *    driven here — the harness measures the SHIPPED mechanism (window reset,
+ *    refusal on the 5th, `ccImmuneUntil`), not a second transcription of it.
+ * 2. **Max-wins overlap.** `03` §7.7's stacking rule is "max-wins on
+ *    remaining time"; two stuns landing on the same step deny one interval,
+ *    not two. The old code added their durations.
+ *
+ * Documented model gap, stated rather than silently narrowed (O-58): the cold
+ * `blade_seal` -> `frozen` half of §12.7's loop is NOT simulated. `frozen`
+ * shares this chain, so a build stacking it can only push the measured
+ * fraction UP; closing that gap needs chill accumulation (§7.3) driven by a
+ * per-build attack cadence, which this file's single-primary-skill engine
+ * does not produce. Every build that carries a cold imbue says so on its own
+ * result line. A normal monster is the worst case by construction — a boss
+ * takes `duration × 0.25` on top (§7.7), so "boss included" is covered by
+ * measuring the un-scaled actor. */
 function checkB10(build) {
   const stunSkills = [];
   for (const [skillId, allocated] of build.allocation) {
     if (skillId === 'ram_charge' || skillId === 'war_cry') {
-      const def = SKILLS_BY_ID.get(skillId);
       const effLevel = allocated + 1;
       const ref = SKILL_REF[skillId];
       const cooldown = Math.max(ref.cooldown.floor, evalCurve({ base: ref.cooldown.base, perLevel: ref.cooldown.perLevel }, effLevel));
@@ -1416,29 +1463,54 @@ function checkB10(build) {
       stunSkills.push({ skillId, cooldown, stunDuration });
     }
   }
-  if (stunSkills.length === 0) return { note: true, lines: ['NOTE: no stun-capable skill (ram_charge/war_cry) in this build — 0% denial'] };
-  // Apply the DR chain (03 §7.7, imported constants) to every cast that
-  // lands inside a rolling 6.0s window, worst case: casts as often as
-  // cooldown allows, DR multipliers applied in order, immunity after the
-  // 4th application per DR_CHAIN_MULTIPLIERS.length.
-  let windowTotal = 0;
-  const arithmetic = [];
-  for (const s of stunSkills) {
-    let t = 0; let appCount = 0; let sum = 0;
-    while (t < DR_CHAIN_WINDOW_SECONDS && appCount < DR_CHAIN_MULTIPLIERS.length) {
-      const mult = DR_CHAIN_MULTIPLIERS[appCount];
-      const applied = s.stunDuration * mult;
-      sum += applied;
-      arithmetic.push(applied.toFixed(2));
-      t += s.cooldown;
-      appCount++;
-    }
-    windowTotal += sum;
+  const coldImbue = build.allocatedOf('blade_seal') > 0;
+  const gapNote = coldImbue ? ' [model gap: this build carries blade_seal, whose frozen half is not simulated — see checkB10 header]' : '';
+  if (stunSkills.length === 0) {
+    return { pass: true, lines: [`no stun-capable skill (ram_charge/war_cry) in this build — 0.0% denial vs ${(B10_MAX_DENIAL * 100).toFixed(0)}% ceiling${gapNote}`] };
   }
-  const fraction = Math.min(1, windowTotal / DR_CHAIN_WINDOW_SECONDS);
+
+  // Worst case: every stun skill is cast the moment its cooldown allows,
+  // all of them starting at t=0, against one monster that never dies.
+  const totalSteps = Math.round(B10_TIMELINE_SECONDS * FIXED_HZ);
+  const windowSteps = Math.round(B10_WINDOW_SECONDS * FIXED_HZ);
+  const actor = { stunChain: 0, stunChainAt: 0, ccImmuneUntil: 0 };
+  const denied = new Uint8Array(totalSteps);
+  const nextCastStep = stunSkills.map(() => 0);
+  const arithmetic = [];
+  let stunnedUntil = 0;
+
+  for (let step = 0; step < totalSteps; step++) {
+    for (let i = 0; i < stunSkills.length; i++) {
+      if (step < nextCastStep[i]) continue;
+      const s = stunSkills[i];
+      nextCastStep[i] = step + Math.round(s.cooldown * FIXED_HZ);
+      const roll = rollDrChain(actor, step);
+      if (!roll.allowed) {
+        if (arithmetic.length < 12) arithmetic.push(`refused@${(step / FIXED_HZ).toFixed(1)}s`);
+        continue;
+      }
+      const applied = s.stunDuration * roll.multiplier;
+      if (arithmetic.length < 12) arithmetic.push(applied.toFixed(2));
+      const until = step + Math.round(applied * FIXED_HZ);
+      if (until > stunnedUntil) stunnedUntil = until; // max-wins on remaining time
+    }
+    if (step < stunnedUntil) denied[step] = 1;
+  }
+
+  let running = 0;
+  for (let i = 0; i < windowSteps; i++) running += denied[i];
+  let worstSteps = running;
+  let worstAtStep = 0;
+  for (let step = windowSteps; step < totalSteps; step++) {
+    running += denied[step] - denied[step - windowSteps];
+    if (running > worstSteps) { worstSteps = running; worstAtStep = step - windowSteps + 1; }
+  }
+
+  const fraction = worstSteps / windowSteps;
+  const pass = fraction <= B10_MAX_DENIAL + 1e-9;
   return {
-    note: true,
-    lines: [`NOTE: worst-window stun denial ${(fraction * 100).toFixed(1)}% — ${arithmetic.join(' + ')} = ${windowTotal.toFixed(2)}s / ${DR_CHAIN_WINDOW_SECONDS}s window (D-54: ruled unsatisfiable as a hard gate, reported not failed; immunity ${DR_CHAIN_IMMUNITY_SECONDS}s follows the 4th application)`],
+    pass,
+    lines: [`worst ${B10_WINDOW_SECONDS.toFixed(1)}s window: ${(fraction * 100).toFixed(1)}% denial (${(worstSteps / FIXED_HZ).toFixed(2)}s at t=${(worstAtStep / FIXED_HZ).toFixed(1)}s) vs ${(B10_MAX_DENIAL * 100).toFixed(0)}% ceiling — chain ${arithmetic.join(' -> ')} over a ${B10_TIMELINE_SECONDS.toFixed(0)}s timeline (D-85)${gapNote}`],
   };
 }
 
@@ -1457,10 +1529,9 @@ function buildBuildChecks(build, isNamed) {
     // Everything downstream assumes a legal allocation — report the rest as
     // skip rather than computing DPS off an illegal build (never silently
     // pretend it was evaluated).
-    for (const id of ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B11']) {
+    for (const id of ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11']) {
       checks.push({ id, severity: id === 'B2' || id === 'B6' ? 'fail' : 'fail', buildName: build.name, pass: null, lines: ['SKIP — B1 (allocation validity) failed for this build'] });
     }
-    checks.push({ id: 'B10', severity: 'warn', buildName: build.name, pass: true, note: true, lines: ['NOTE: B1 failed, no CC arithmetic computed'] });
     return checks;
   }
 
@@ -1470,20 +1541,19 @@ function buildBuildChecks(build, isNamed) {
   push('B2', 'fail', { pass: hitsA >= 2 && hitsA <= 4, lines: [`landed hits vs yardstick A, class free action = ${hitsA.toFixed(2)} (want 2..4)`] });
 
   const ttkA = freeActionTtkAgainst(build, YARDSTICKS.A);
-  if (build.classId === 'emberwright' && ttkA < 1.5) {
-    // A genuine spec-internal tension, the same species as D-50/D-54, not a
-    // defect in this harness: `05` §9.4's own printed E-A Bolt figure is
-    // 1.46s — ALSO below the [1.5,3.0] floor its own summary row states —
-    // yet that row calls it "met". Reported (not forced) per the
-    // coordinator's own instruction: emit both numbers and the window,
-    // never adjust the window to make it pass.
-    checks.push({
-      id: 'B3', severity: 'warn', buildName: build.name, pass: true, note: true,
-      lines: [`NOTE: Emberwright class free action (ember_bolt) TTK vs yardstick A = ${ttkA.toFixed(2)}s, below the [1.5,3.0]s floor — 05 §9.4's own printed E-A Bolt figure (1.46s) is ALSO below that floor yet its own summary row calls it "met"; a spec-internal inconsistency (same species as D-50/D-54), flagged for the owner, window not adjusted`],
-    });
-  } else {
-    push('B3', 'fail', { pass: ttkA >= 1.5 && ttkA <= 3.0, lines: [`TTK vs yardstick A, class free action = ${ttkA.toFixed(2)}s (want 1.5..3.0)`] });
-  }
+  // Owner ruling D-86 (2026-08-04) — B3's LOWER bound is the basic attack's.
+  // `05` §9.4's own verdict row for this very target reads: "Required 1.5-3.0
+  // s | basic attack 2.72 s (Ravager); every *skill* rotation kills faster |
+  // met by the basic attack; skills deliberately beat it". Two of the three
+  // classes have a SKILL as their free action (`ember_bolt`, `rune_strike`,
+  // see classFreeActionStats), so for them the floor asserts the opposite of
+  // what the document says it wants. The 3.0 s ceiling binds for everyone —
+  // a free action that cannot kill a normal monster in three seconds is the
+  // real failure this row exists to catch. No game number changed.
+  const freeActionIsSkill = build.classId !== 'ravager';
+  const b3Pass = freeActionIsSkill ? ttkA <= 3.0 : (ttkA >= 1.5 && ttkA <= 3.0);
+  const b3Band = freeActionIsSkill ? '<= 3.0 (floor waived by D-86: free action is a skill)' : '1.5..3.0';
+  push('B3', 'fail', { pass: b3Pass, lines: [`TTK vs yardstick A, class free action = ${ttkA.toFixed(2)}s (want ${b3Band})`] });
 
   const noDamagePrimary = hasNoDamagePrimary(build);
   const skipReason = 'this build\'s highest-allocated skill deals no direct damage (passive/buff/mobility primary, or one of NON_GENERIC_CADENCE_SKILLS) — B4/B5 need the build\'s OWN damage rotation, which does not exist here';
@@ -1545,6 +1615,13 @@ function buildBuildChecks(build, isNamed) {
     // without its own duty-cycle special case (which this file applies to
     // S10's ratio only, not the DPS/TTK pipeline — a known, disclosed gap).
     const summonModelGap = SKILLS_BY_ID.get(primaryIdB5).type === 'summon';
+    // Owner ruling D-87 (2026-08-04) — the four model-gap branches below stay
+    // NOTE. Unlike D-85/D-86 the criterion here is satisfiable and `05` §9.4's
+    // own printed figures (B-B Storm 15.56 s, B-C Unity 11.04 s) sit inside
+    // the 5-20 s band; what cannot reach them is this file's single-primary-
+    // skill engine, and the multi-skill rotation engine that would is
+    // `--builds`/`--sweep`, M7's by D-48. The gaps are named and narrow — any
+    // build outside these four shapes still fails for real (the `else`).
     if (!(ttkB >= 5 && ttkB <= 20) && dischargeModelGap) {
       checks.push({
         id: 'B5', severity: 'warn', buildName: build.name, pass: true, note: true,
@@ -1583,7 +1660,7 @@ function buildBuildChecks(build, isNamed) {
 
   push('B8', 'fail', checkB8(build));
   push('B9', 'fail', checkB9(build));
-  push('B10', 'warn', checkB10(build));
+  push('B10', 'fail', checkB10(build));
 
   // B11 — determinism. This model draws no RNG at all (see the file
   // header); running it twice for the same build produces byte-identical
@@ -1783,11 +1860,14 @@ async function main() {
     }
   }
   const sweepAggregateChecks = [...sweepTally.entries()].map(([id, t]) => ({
-    id, severity: id === 'B10' ? 'warn' : 'fail', buildName: 'sweep (aggregated)', aggregate: true, pass: t.fail === 0,
-    // D-54: B10 is always a note. B6 is always a note too (Instruction-tier
-    // Molgrim data is out of M4's own scope, never computed at all — see
-    // that check's own per-build header). Both never pass/fail.
-    note: id === 'B10' || id === 'B6',
+    id, severity: 'fail', buildName: 'sweep (aggregated)', aggregate: true, pass: t.fail === 0,
+    // B6 is always a note (Instruction-tier Molgrim data is out of M4's own
+    // scope, never computed at all — see that check's own per-build header).
+    // B10 was one too until D-85 gave it a satisfiable window; it is now a
+    // real verdict over the whole sweep, which is where a stun-locking build
+    // actually lives — none of `05` §9's nine hand-written builds allocates
+    // `ram_charge` or `war_cry` at all.
+    note: id === 'B6',
     lines: [
       `sweep (${sweep.length} builds): ${t.pass} pass, ${t.fail} fail, ${t.warn} warn, ${t.note} note, ${t.skip} skip`,
       ...(t.fail > SWEEP_FAIL_SAMPLE_CAP ? [`(showing first ${SWEEP_FAIL_SAMPLE_CAP} of ${t.fail} failures)`] : []),

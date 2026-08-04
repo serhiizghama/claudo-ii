@@ -498,7 +498,7 @@ export function refreshWeaponCache(item, base) {
   if (!item._cache) item._cache = { stats: null, displayName: null, sellValue: 0, iconCanvas: null, unusable: false };
   let w = item._cache.weapon;
   if (!w) {
-    w = { minDamage: 0, maxDamage: 0, attackTime: 0, handling: '' };
+    w = { minDamage: 0, maxDamage: 0, attackTime: 0, handling: '', range: 0 };
     item._cache.weapon = w;
   }
   const rolls = item.rolls;
@@ -506,6 +506,11 @@ export function refreshWeaponCache(item, base) {
   w.maxDamage = rolls ? rolls.damageMax : base.weapon.maxDamage;
   w.attackTime = base.weapon.attackTime;
   w.handling = base.weapon.handling;
+  // O-94 cause 1: `11-flows.md` §3.6 step 3 reads `items.weaponOf(actor)
+  // .weapon.range`, but this view never carried it, so every actor fell back
+  // to `cast.js`'s unarmed 1.4 m literal and melee builds swung short. A
+  // base-table property, never rolled — all 27 weapon bases carry it.
+  w.range = base.weapon.range;
 }
 
 function emit(state, name, payload) {

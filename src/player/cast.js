@@ -89,21 +89,21 @@
 // Weapon range for `actor` mode — a real, reachable gap, not fabricated
 // ---------------------------------------------------------------------------
 // `11-flows.md` §3.6 step 3 gives the exact formula: `range =
-// items.weaponOf(actor).weapon.range` (unarmed: 1.4 m). Checked directly
-// against `src/items/equipment.js`: `weaponOf()` is real and returns a real
-// `ItemInstance`, but neither the returned instance NOR its `_cache.weapon`
-// view (`refreshWeaponCache`, `src/items/equipment.js:490-503`) ever carries
-// a `range` field — only `minDamage`/`maxDamage`/`attackTime`/`handling`.
-// `ItemBase.weapon.range` (`01-data-model.md:769`) exists on the STATIC base
-// table, but nothing in `items`' own public surface exposes it per-instance.
-// This is `items`' own gap (`src/items/` is not a file this ticket owns) —
-// `weaponRangeOf` below reads `_cache.weapon.range` defensively (a normal
-// "this field may be absent from the data" check, not an O-27/O-39
-// "assert the method doesn't exist" guard — `weaponOf` itself is real and
-// always called) and falls back to the ONE literal number `11-flows.md`
-// actually gives (`UNARMED_RANGE_M = 1.4`) for every actor regardless of
-// its equipped weapon, until `items` closes the gap. Flagged in this
-// ticket's report.
+// items.weaponOf(actor).weapon.range` (unarmed: 1.4 m).
+//
+// PLYR-3 shipped against a broken half of that formula and said so: `items`'
+// `_cache.weapon` view carried `minDamage`/`maxDamage`/`attackTime`/
+// `handling` but never `range`, so `weaponRangeOf` fell back to the unarmed
+// literal for EVERY actor no matter what it held. That gap became O-94's
+// cause 1 — the M4 gate's "each class clears the test room" was measuring
+// reach, not damage, with monsters standing at 1.6 m and every class swinging
+// at 1.4 m. Closed 2026-08-04 in `src/items/equipment.js#refreshWeaponCache`
+// (one line, plus `range` in the preallocated view's shape).
+//
+// `weaponRangeOf` below is unchanged and still reads the field defensively —
+// a normal "this field may be absent from the data" check, not an O-27/O-39
+// "assert the method doesn't exist" guard — because the unarmed pseudo-weapon
+// legitimately has no `_cache` at all.
 //
 // ---------------------------------------------------------------------------
 // Zero-allocation discipline
@@ -137,10 +137,10 @@ const TEAM_NEUTRAL = 2;
 const ACTOR_FLAG_UNTARGETABLE = 1 << 1;
 
 /** `11-flows.md` §3.6 step 3, verbatim: "range = items.weaponOf(actor).
- * weapon.range (unarmed: 1.4 m)". See the file header, "Weapon range for
- * `actor` mode", for why this is also the fallback for an EQUIPPED weapon
- * today (the item cache has no `range` field yet — `items`' own gap). */
-const UNARMED_RANGE_M = 1.4;
+ * weapon.range (unarmed: 1.4 m)". The fallback for an actor with nothing in
+ * `mainHand`; an equipped weapon now carries its own reach (O-94 cause 1
+ * closed the `items` gap this file's header used to describe). */
+export const UNARMED_RANGE_M = 1.4;
 
 /** `11-flows.md` §3.6's own chase-destination formula: `dest = target.pos -
  * normalize(target.pos - actor.pos) x (range - 0.10)` — stop just inside

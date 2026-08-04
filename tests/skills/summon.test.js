@@ -79,11 +79,28 @@ function spawnRuneblade({ dischargeLevel = 10, unityLevel = 20, skillBonusDischa
   return player;
 }
 
-function spawnMonsterAt(originX, originZ, dx, dz, life = 1_000_000) {
+function spawnMonsterAt(originX, originZ, dx, dz, maxLifeFloor = 1_000_000) {
   const m = actors.spawn({ kind: 'monster', archetypeId: 'bone_ranker', team: 1, x: originX + dx, z: originZ + dz, level: 1 });
   actors.setState(m, 'idle');
-  actors.stats(m);
-  m.life = life;
+  // ACTR-24 made a bone_ranker's `maxLife` real (~20 at mlvl1, was 1 before
+  // — the defect this ticket closed). This fixture used to write `m.life`
+  // to a huge number directly, ABOVE a `maxLife` it never raised — an
+  // illegal state. `vessels.js#effectiveLifeRegenRate` injects a baseline
+  // 0.006 life/s regen for every monster regardless of composed stats
+  // (":161-162", independent of ACTR-24), and `tickAccumulatedResource`
+  // clamps `life` down to `maxLife` the moment that regen accumulator
+  // first crosses one whole point — at old maxLife=1 that took ~10 000
+  // steps (never reached inside this test's 1 200-step window, so the
+  // illegal `life` silently survived the whole run); at the real maxLife=20
+  // it takes ~500 steps, which IS inside the window — `life` snapped
+  // 1,000,000ish -> 20 mid-run, and the next real discharge chain hit
+  // finished the kill, which is what made `freeCastEnqueued` read 36
+  // instead of 80 (six monsters going `target.dead` partway through).
+  // Fixed at the source: raise `maxLife` for real, through the actual
+  // composition path, so `life` is never above it in the first place.
+  actors.setSourceLayer(m, 'equipment', { maxLife: maxLifeFloor });
+  const stats = actors.stats(m);
+  m.life = stats.maxLife;
   return m;
 }
 

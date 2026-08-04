@@ -12,6 +12,12 @@
 // is deliberately absent, not stubbed. See this ticket's report for what
 // that leaves out downstream.
 //
+// WRLD-4 round 2 — the coordinator widened the grant to include `bounds`,
+// `surfaceAt`, `entry`, `isTown`, `groundHeight` and the new
+// `./height.js` (the terrace field `07` §1.3 describes; see that file's own
+// header for the algorithm). `src/world/footprint.js` remains out of scope
+// — nothing here needed convex distance functions.
+//
 // ---------------------------------------------------------------------------
 // O-35 — the `Footprint` shape emitted here is `02-api-contracts.md` §4's,
 // never `07-world-gen.md` §1.7's superseded one
@@ -61,16 +67,20 @@
 // from any special-case code.
 //
 // ---------------------------------------------------------------------------
-// Why `static deps = ['physics']`, not `['materials', 'physics']`
+// O-61 (WRLD-4) — `static deps` is `['materials','physics']`, matching `02`
 // ---------------------------------------------------------------------------
 // `02-api-contracts.md` §5 declares `static deps = ['materials','physics']`.
-// `materials` does not exist yet (MATL-1, M5) — registering it as a hard
-// dependency throws at boot before any subsystem's `init()` runs, for
-// every ticket landed so far, not just this one. `src/actors/index.js`
-// (ACTR-1) hit the identical problem and resolved it the same way: declare
-// only the dependency that is real today. Once MATL-1 registers
-// `materials`, this line goes back to `['materials', 'physics']` — nothing
-// else here assumes `materials` is absent.
+// From WRLD-1 until MATL-1 landed, `materials` did not exist yet and this
+// line declared only `['physics']` — registering a dependency that isn't
+// real yet throws at boot before any subsystem's `init()` runs
+// (`src/actors/index.js`/ACTR-1 hit the identical problem and resolved it
+// the same way at the time). MATL-1 has now registered `materials` in
+// `src/main.js` (right after `RenderSystem`, ahead of `world` in boot
+// order), so that workaround no longer applies: this line is restored to
+// the real contract below. Nothing else in this file ever assumed
+// `materials` was absent — `init()` never reaches into it (WRLD-4 does not
+// touch geometry/material resolution; that is later tickets', per the
+// "What 'geometry build' means in THIS ticket" section above).
 //
 // ---------------------------------------------------------------------------
 // Physics and nav are reached defensively, never assumed
@@ -189,6 +199,65 @@
 // anywhere in this file.
 
 import { ZONE_DESCRIPTORS, ZONE_DESCRIPTORS_BY_ID, BOUNDARY_WALL_THICKNESS, BOUNDARY_WALL_HEIGHT } from './data/zones.js';
+// WRLD-4 (D-66) — the `requestZone` latch and the between-frame service
+// point live in `./zone.js`, not here; these three are thin forwards wired
+// onto `WorldSystem` below (`requestZone`/`serviceZoneRequest` methods and
+// the `_zoneRequest` field), the same "index.js: wiring only" shape
+// `src/nav/index.js`'s NAV-2/4/5 addenda already use. See `./zone.js`'s own
+// header for why this is not a second `enterZone`.
+import { createZoneRequestState, requestZoneLatch, serviceZoneRequestOnce } from './zone.js';
+// WRLD-4 round 2 — the terrace field (`07` §1.3) `groundHeight`/`entry`
+// read from. See `./height.js`'s own header for the algorithm and for why
+// `enterZone` passes it `seed`, not a real `S1 shape` fork.
+import { buildHeightField, sampleHeightField } from './height.js';
+// WRLD-6 — O-99's `RASTER.CELL_SIZE`, matching `src/nav/index.js`'s own
+// grid-geometry formula exactly (see `_buildNavGroundY`'s own comment).
+import { RASTER } from './raster.js';
+// WRLD-6 — T6 (Layout): the Ashen Wastes generator. `generateRidgewalkLayout`
+// (WRLD-5, R1-R7) plus this ticket's own R8/R9 (`./gen/wastes.js`) and R10
+// (`placeRidgewalkEntries`, WRLD-5) — see this file's own `enterZone` for how
+// they compose and why only `zoneId === 'ashen_wastes'` takes this path
+// (no other zone's generator exists yet — WRLD-7/8/9/10 land behind this
+// ticket, rule 11).
+import { generateRidgewalkLayout, placeRidgewalkEntries } from './gen/ridgewalk.js';
+import { runR8Dressing, runR9Boundary, toFootprints, buildInstancingPlan } from './gen/wastes.js';
+// WRLD-6 — T7 (Geometry), `three`-legal. See `./build/wastes.js`'s own
+// header for the D-72 lint-root finding this import is inseparable from
+// (this ticket's report has the full disclosure; `tools/check-imports.mjs`
+// is not in this ticket's file grant).
+import { buildWastesGeometry, buildAshBerm } from './build/wastes.js';
+// WRLD-7 — the Bonereach BSP hall generator (`07` §4, B1-B10). Aliased
+// `toFootprints`/`toFootprints` collide by name with Wastes's own export of
+// the same name — `bonereachToFootprints` disambiguates the call site
+// below. See `./gen/bonereach.js`'s own header for why this file's
+// `toFootprints` is footprint-ONLY (no `GroundRegion`s): `nav.rebuild()`
+// (src/nav/index.js, not this ticket's file grant) hardcodes
+// `groundRegions: null` on every call, so a room generator's blocking
+// geometry must reach nav entirely through `Footprint`s.
+import {
+  generateBonereachLayout,
+  placeBonereachLoot,
+  runBonereachDressing,
+  placeBonereachEntries,
+  buildWallSegments as buildBonereachWallSegments,
+  toFootprints as bonereachToFootprints,
+} from './gen/bonereach.js';
+import { buildBonereachGeometry, disposeBonereachGeometry } from './build/bonereach.js';
+// WRLD-9 — R11 (`07` §8): spawn points and pack descriptors. Pure, headless
+// (no `ctx`) — see `./spawn.js`'s own header. Wired in below at T10, strictly
+// AFTER `nav.rebuild(instance)` (the live grid it reads must already carry
+// THIS zone's real walkable/region data), and only for the two zones with a
+// real generator (`isWastes`/`isBonereach` — rule 11, no other exists yet).
+import { planWastesSpawns, planBonereachSpawns } from './spawn.js';
+
+/** WRLD-4 round 2 (`07` §1.3) — the honest current terrace set: ONE
+ * terrace, boundless (`bounds` omitted, so it covers the whole zone),
+ * elevation `0.00` m — exactly what §1.3 says the town has, extended to
+ * every zone since no generator (WRLD-5..8) authors real terrace regions
+ * yet ("Scope honesty", this ticket's own report). ASSIGNED. Replaced
+ * wholesale (never mutated) the day a generator hands `enterZone` a real
+ * terrace list for a given zone. */
+const DEFAULT_TERRACES = Object.freeze([Object.freeze({ elevation: 0 })]);
 
 /**
  * FNV-1a 32-bit mix, folded over `worldSeed`, every char of `zoneId`, then
@@ -321,7 +390,7 @@ function freezeFootprints(footprints) {
 
 export class WorldSystem {
   static id = 'world';
-  static deps = ['physics']; // see the file header — 'materials' omitted, MATL-1 not built yet
+  static deps = ['materials', 'physics']; // O-61 (WRLD-4) — see the file header
 
   constructor() {
     this._ctx = null;
@@ -360,6 +429,74 @@ export class WorldSystem {
      * monotonically increasing integer, matching 01-data-model.md §9.2's
      * shape (`navVersion: int, +1 on every rebuild`). */
     this._navVersionCounter = 0;
+
+    /** WRLD-4 (D-66) — the `requestZone` latch's own state, including its
+     * reused `enterZone` `opts` scratch object. Built once here, never
+     * per-call (rule 5 / `requestZone`'s `Alloc: no`) — see `./zone.js`'s
+     * header for the full contract. */
+    this._zoneRequest = createZoneRequestState();
+
+    /** WRLD-4 round 2 — this zone's precomputed terrace/noise table (see
+     * `./height.js`). `null` until the first `enterZone`; `groundHeight`
+     * documents (and this file's methods enforce) that querying before any
+     * zone is loaded is a caller error. Rebuilt wholesale, once, on every
+     * `enterZone` — never mutated in place. */
+    this._heightField = null;
+
+    /** `02-api-contracts.md` §5's `bounds(out?)` — the shared scratch
+     * object returned when a caller omits `out`, so the no-`out` call is
+     * exactly as `Alloc: no` as the with-`out` one (the same convention
+     * `src/nav/index.js`'s `snap`/`this._snapScratch` already uses). The
+     * caller must treat it as invalidated by the next no-`out` `bounds()`
+     * call, same as any reused scratch. */
+    this._boundsScratch = { minX: 0, minZ: 0, maxX: 0, maxZ: 0 };
+
+    /** `02-api-contracts.md` §5 / `07` §13 A4's `entry(entryTag, out?)` —
+     * the shared scratch object for the no-`out` call, same convention as
+     * `_boundsScratch` above. */
+    this._entryScratch = { x: 0, y: 0, z: 0, facing: 0 };
+
+    /** WRLD-6 — the current zone's Ashen Wastes dressing/boundary plan
+     * (`null` for every other zone kind — no other generator exists yet).
+     * Kept for the T7 geometry build immediately below it in `enterZone`
+     * and for tests/report tooling to inspect the just-generated zone
+     * without re-running the generator. Replaced wholesale, never mutated,
+     * on every `enterZone` (same discipline as `_staticFootprints`). */
+    this._wastesDressing = null;
+    this._wastesBoundary = null;
+    this._wastesLayout = null;
+
+    /** WRLD-6 (T7) — the `THREE.Group` the wastes dressing/boundary
+     * geometry was added to `ctx.scene` under, so the NEXT `enterZone` can
+     * remove and dispose it before building the next zone's own geometry
+     * (T3's own "dispose every geometry... of the outgoing zone" — a
+     * narrow slice of it, scoped to exactly what this ticket adds; a full
+     * T3 teardown of every subsystem's geometry is not this ticket's file
+     * grant). `null` when nothing has been built yet, or the current zone
+     * is not `ashen_wastes`. */
+    this._wastesGeometryGroup = null;
+
+    /** WRLD-6 — `buildWastesGeometry`'s own return value for the current
+     * zone (`{group, meshes, drawCalls, triangles, budgetedTriangles}`),
+     * `null` when nothing was built (no `materials`/`ctx.scene`, or a
+     * non-wastes zone). Report/test-only convenience — nothing reads this
+     * back for gameplay. */
+    this._wastesGeometryResult = null;
+
+    /** WRLD-7 — the current zone's Bonereach layout/dressing plan (`null`
+     * for every other zone kind), and the `THREE.Group` its T7 geometry
+     * build added to `ctx.scene`, so the NEXT `enterZone` can dispose it —
+     * same discipline as `_wastesLayout`/`_wastesGeometryGroup` above. */
+    this._bonereachLayout = null;
+    this._bonereachDressing = null;
+    this._bonereachExit = null;
+    this._bonereachGeometryGroup = null;
+
+    /** WRLD-9 — `./spawn.js`'s own `report` object for the current zone
+     * (`null` before the first `enterZone`, or for a zone kind with no
+     * spawn pass — rule 11). Report/test-only, not a gameplay-facing field;
+     * `spawnPoints`/`packs` below are the contracted surface (O-71). */
+    this._spawnReport = null;
   }
 
   /** @param {object} ctx */
@@ -375,6 +512,29 @@ export class WorldSystem {
    * @param {number} seed */
   setWorldSeed(seed) {
     this._worldSeed = seed >>> 0;
+  }
+
+  /** `02-api-contracts.md` §5 / `11-flows.md` A-2: `requestZone(zoneId,
+   * entryTag, opts?) => boolean`. `Fixed: Y, Alloc: no` — safe to call from
+   * `player`'s `fixedUpdate`. Thin forward into `./zone.js`'s latch (WRLD-4,
+   * D-66 — the latch itself lives there, not here).
+   * @param {string} zoneId
+   * @param {string} entryTag
+   * @param {{runIndex?: number, difficulty?: string}} [opts]
+   * @returns {boolean} `false` when a request is already pending. */
+  requestZone(zoneId, entryTag, opts) {
+    return requestZoneLatch(this._zoneRequest, zoneId, entryTag, opts);
+  }
+
+  /** The service point `src/core/engine.js` phase 4b already calls, by
+   * name, between `lateUpdate` and `render` (O-1 — contracted nowhere in
+   * `02-api-contracts.md`; the name is settled by that shipped call site,
+   * not by this ticket). Thin forward into `./zone.js` (WRLD-4, D-66),
+   * which drives the real `enterZone` when a request is pending — see that
+   * file's header for why that is the whole T5->T8->T9->T12 emission, not a
+   * second implementation of it. */
+  serviceZoneRequest() {
+    serviceZoneRequestOnce(this._zoneRequest, this);
   }
 
   /** `02-api-contracts.md` §5: `descriptor(zoneId) => ZoneDescriptor`.
@@ -407,11 +567,130 @@ export class WorldSystem {
     return hashSeed(this._worldSeed, zoneId, runIndex);
   }
 
+  /** `02-api-contracts.md` §5: `isTown` -> `boolean`. `false` before any
+   * zone is loaded — a plain flag, not a "no sensible answer" case (unlike
+   * `bounds`/`groundHeight`/`surfaceAt`/`entry` below), so this never
+   * throws (see this ticket's report for why those four do). */
+  get isTown() {
+    return this._current ? this._current.descriptor.kind === 'town' : false;
+  }
+
+  /** `02-api-contracts.md` §5: `bounds(out?) => Bounds`. `Fixed: Y, Alloc:
+   * no` in both branches — `out`, when given, is written and returned;
+   * omitted, this returns `this._boundsScratch` (see the constructor's own
+   * field comment), never a fresh object.
+   * @param {{minX:number,minZ:number,maxX:number,maxZ:number}} [out]
+   * @returns {{minX:number,minZ:number,maxX:number,maxZ:number}}
+   * @throws if no zone is currently loaded — there is no sensible bounds to
+   *   report, and a caller asking before the first `enterZone` is a bug
+   *   this should surface loudly, not paper over with a fake zero-size
+   *   zone (see this ticket's report). */
+  bounds(out) {
+    const inst = this._current;
+    if (!inst) throw new Error('world.bounds: no zone is currently loaded');
+    const target = out || this._boundsScratch;
+    target.minX = inst.boundsMinX;
+    target.minZ = inst.boundsMinZ;
+    target.maxX = inst.boundsMaxX;
+    target.maxZ = inst.boundsMaxZ;
+    return target;
+  }
+
+  /** `02-api-contracts.md` §5: `surfaceAt(x, z) => SurfaceType`. ASSIGNED
+   * placeholder (see this ticket's report, "Scope honesty"): no per-cell
+   * ground-surface region generator exists yet (that is generator work,
+   * WRLD-5..8), so every point in the zone reads as the same value —
+   * `descriptor.surfaces[0]`, the zone's own primary ground surface (`07`
+   * §1.6), the exact same "first listed surface" convention
+   * `buildBoundaryFootprints` already uses for the placeholder wall
+   * colliders. `x`/`z` are accepted (the real contract signature) but
+   * unused until real per-position data exists.
+   * @param {number} x
+   * @param {number} z
+   * @returns {string} a `SURFACE` value.
+   * @throws if no zone is currently loaded. */
+  surfaceAt(x, z) {
+    void x;
+    void z;
+    const inst = this._current;
+    if (!inst) throw new Error('world.surfaceAt: no zone is currently loaded');
+    return inst.descriptor.surfaces[0];
+  }
+
+  /** `02-api-contracts.md` §5 / `07` §13 A4: `entry(entryTag, out?) =>
+   * {x,y,z,facing}`. Reads `ZoneInstance.entries` (`01` §9.2) first — real,
+   * generator-authored data, forward-compatible with the day one exists —
+   * and falls back to the zone's own centre, facing `0`, ONLY because that
+   * map is always empty today (no generator populates it yet; see this
+   * ticket's report). `y` is never stored (`01` §9.2 only carries `x, z,
+   * facing`) — always `this.groundHeight(x, z)`, matching `07` §1.3's own
+   * `Actor.y = world.groundHeight(x, z) + hoverY` rule.
+   *
+   * A4: when `out` is given but has no `facing` key, `facing` is left
+   * untouched on it (the exact old `Vec3` — `x, y, z` only — behaviour);
+   * `out` otherwise gets all four fields. Omitting `out` returns
+   * `this._entryScratch` (see the constructor's own field comment),
+   * always with `facing` set.
+   * @param {string} entryTag
+   * @param {{x?:number,y?:number,z?:number,facing?:number}} [out]
+   * @returns {{x:number,y:number,z:number,facing?:number}}
+   * @throws if no zone is loaded, or `entryTag` is not one of the current
+   *   zone's own declared `entryTags` (`01` §9.1). */
+  entry(entryTag, out) {
+    const inst = this._current;
+    if (!inst) throw new Error('world.entry: no zone is currently loaded');
+    if (!inst.descriptor.entryTags.includes(entryTag)) {
+      throw new Error(`world.entry: unknown entryTag '${entryTag}' for zone '${inst.zoneId}'`);
+    }
+
+    const stored = inst.entries.get(entryTag); // real data path — always undefined today, see the file header
+    const x = stored ? stored.x : 0; // ASSIGNED placeholder: zone centre — no generator has populated real entries yet
+    const z = stored ? stored.z : 0;
+    const facing = stored ? stored.facing : 0;
+    const y = this.groundHeight(x, z);
+
+    const target = out || this._entryScratch;
+    target.x = x;
+    target.y = y;
+    target.z = z;
+    if (!out || 'facing' in out) target.facing = facing; // A4 — old Vec3 form when out lacks facing
+    return target;
+  }
+
+  /** `02-api-contracts.md` §5 / `07` §1.3: `groundHeight(x, z) => number`
+   * — `terrace(x, z) + noise(x, z)`, the analytic function. `Fixed: Y,
+   * Alloc: no` — a thin forward into `./height.js`'s `sampleHeightField`
+   * against this zone's own precomputed table (built once per `enterZone`
+   * — see that call site's own comment).
+   * @param {number} x
+   * @param {number} z
+   * @returns {number} metres
+   * @throws if no zone is currently loaded. */
+  groundHeight(x, z) {
+    if (!this._heightField) throw new Error('world.groundHeight: no zone is currently loaded');
+    return sampleHeightField(this._heightField, x, z);
+  }
+
   /** `02-api-contracts.md` §5: `staticFootprints` -> `readonly Footprint[]`
    * — frozen at `zone:ready`, invalidated by the next `enterZone`. Returns
    * the same frozen array every call between two zone loads (Alloc: no). */
   get staticFootprints() {
     return this._staticFootprints;
+  }
+
+  /** `02-api-contracts.md` §5: `spawnPoints` -> `SpawnPoint[]` (O-71 — a
+   * contracted property on `world` itself, not only reachable through
+   * `world.current.spawnPoints`). WRLD-9's own T10 pass populates
+   * `this._current.spawnPoints`; this just forwards it, `[]` before any
+   * zone has loaded (matching `ZoneInstance`'s own literal default). */
+  get spawnPoints() {
+    return this._current ? this._current.spawnPoints : [];
+  }
+
+  /** `02-api-contracts.md` §5: `packs` -> `PackDescriptor[]` — same
+   * forwarding convention as `spawnPoints` above (O-71). */
+  get packs() {
+    return this._current ? this._current.packs : [];
   }
 
   /**
@@ -449,11 +728,124 @@ export class WorldSystem {
       events.emit('zone:teardown', { zoneId: previous.zoneId });
     }
     this._clearPreviousStatics();
+    this._disposeWastesGeometry(); // WRLD-6 — see the field's own comment
+    this._disposeBonereachGeometry(); // WRLD-7 — see the field's own comment
 
     const seed = this.seedFor(zoneId, runIndex);
+    const isWastes = zoneId === 'ashen_wastes'; // WRLD-6 — no other generator exists yet (rule 11)
+    const isBonereach = zoneId === 'bonereach'; // WRLD-7 — WRLD-8/9/10 land behind this ticket (rule 11)
+
+    // WRLD-6 (T6 — Layout): the pure generator. `07` §3.2's own emission
+    // order is "R1..R10 (pure, no three) -> geometry build -> physics.rebuild()
+    // -> nav.rebuild() -> R11 -> zone:ready", and R9 (this ticket's boundary
+    // treatment) draws from the SAME live `S1`/`S2` `generateRidgewalkLayout`
+    // hands back, continued (not re-forked) by `placeRidgewalkEntries`
+    // (R10) afterward — see `src/world/gen/ridgewalk.js`'s own header,
+    // "so a later caller... continues the SAME streams", and this ticket's
+    // report for why R9 runs strictly between R7 and R10.
+    let wastesLayout = null;
+    let wastesDressing = null;
+    let wastesBoundary = null;
+    let wastesEntries = null;
+    let terraces = DEFAULT_TERRACES;
+
+    if (isWastes) {
+      wastesLayout = generateRidgewalkLayout(seed, descriptor);
+      wastesDressing = runR8Dressing(wastesLayout, descriptor, wastesLayout.streams);
+      wastesBoundary = runR9Boundary(wastesLayout, descriptor, wastesLayout.streams);
+      wastesEntries = placeRidgewalkEntries(wastesLayout, descriptor, wastesLayout.streams);
+      // O-99's own trigger: WRLD-5's R5 emits real -2.20 m ravines / +1.20 m
+      // shelves in `wastesLayout.terraces` — using those (instead of
+      // `DEFAULT_TERRACES`'s single flat 0.00 m layer) is what makes the
+      // height field, and therefore `nav.groundY` below, carry real
+      // elevation for this zone. See this file's header note on this
+      // ticket's own O-99 fix.
+      if (wastesLayout.terraces.length > 0) terraces = wastesLayout.terraces;
+    }
+    this._wastesLayout = wastesLayout;
+    this._wastesDressing = wastesDressing;
+    this._wastesBoundary = wastesBoundary;
+
+    // WRLD-7 (T6 — Layout): the Bonereach BSP hall generator. B1-B10 all run
+    // headless off ONE `generateBonereachLayout` call (D-65 consolidates the
+    // spec's own `gen/bsp.js` + dressing split into this one layout file —
+    // see `./gen/bonereach.js`'s own header); B8 (chests) and B9 (dressing,
+    // a bonus — not gated by any of this ticket's numbered criteria) are
+    // separate calls continuing the SAME `layout.streams`, and B10
+    // (entries/exits) is pure geometry, no draw at all.
+    let bonereachLayout = null;
+    let bonereachDressing = null;
+    let bonereachChests = [];
+    let bonereachEntries = null;
+    let bonereachExit = null;
+
+    if (isBonereach) {
+      bonereachLayout = generateBonereachLayout(seed, descriptor);
+      const loot = placeBonereachLoot(bonereachLayout, descriptor, bonereachLayout.streams);
+      bonereachChests = loot.chests;
+      bonereachDressing = runBonereachDressing(bonereachLayout, descriptor, bonereachLayout.streams);
+      const placed = placeBonereachEntries(bonereachLayout, descriptor);
+      bonereachEntries = placed.entries;
+      bonereachExit = placed.exit;
+      // The stair room's 6-step ramp down to -2.40 m (07 §4.1) — real
+      // terraces, the same "replace DEFAULT_TERRACES wholesale" mechanism
+      // O-99 already established for Ridgewalk's ravines/shelves, so
+      // `nav.groundY` below carries Bonereach's own real elevation too.
+      if (bonereachLayout.terraces.length > 0) terraces = bonereachLayout.terraces;
+    }
+    this._bonereachLayout = bonereachLayout;
+    this._bonereachDressing = bonereachDressing;
+    this._bonereachExit = bonereachExit; // report/test-only — no portal-wiring ticket consumes this yet (same gap wastesEntries.exit already has)
+
+    // WRLD-4 round 2 — this zone's terrace/noise table (`./height.js`),
+    // built here so it is already ready for anything a `zone:enter`
+    // listener might synchronously query, and so every `groundHeight`/
+    // `entry` read after this point is `Alloc: no` (the `staticFootprints`
+    // precedent — allocate once, between frames, at the transition).
+    // `seed` (not a real `S1 shape` fork, which does not exist yet — see
+    // this file's header) is the documented interim noise seed.
+    this._heightField = buildHeightField({
+      sizeX: descriptor.sizeX,
+      sizeZ: descriptor.sizeZ,
+      terraces,
+      noiseSeed: seed,
+    });
+
     events.emit('zone:enter', { zoneId, seed, entry: entryTag });
 
-    const footprints = buildBoundaryFootprints(descriptor);
+    // WRLD-6/7 (T7 — Geometry, `three`-legal, see `./build/wastes.js`'s own
+    // header for the D-72 lint finding this import carries). Runs BEFORE T8
+    // physics/T9 nav, per `07` §10.2's own table ordering — geometry build
+    // only ever reads the plain-data plan T6 already produced.
+    const footprints = isWastes
+      ? toFootprints(wastesDressing.props, wastesBoundary.ridgeWall)
+      : isBonereach
+        ? bonereachToFootprints(bonereachLayout, bonereachDressing)
+        : buildBoundaryFootprints(descriptor);
+
+    const materialsSys = typeof this._ctx.peek === 'function' ? this._ctx.peek('materials') : null;
+    if (isWastes && materialsSys && this._ctx.scene) {
+      const plan = buildInstancingPlan(wastesDressing.props, wastesBoundary.ridgeWall, wastesBoundary.silhouette);
+      const geomResult = buildWastesGeometry(this._ctx, plan);
+      buildAshBerm(this._ctx, geomResult.group, wastesBoundary.berm);
+      this._wastesGeometryGroup = geomResult.group;
+      this._wastesGeometryResult = geomResult;
+    } else {
+      this._wastesGeometryResult = null;
+    }
+
+    if (isBonereach && materialsSys && this._ctx.scene) {
+      // Visual walls come from `buildWallSegments` (real doorway gaps),
+      // NOT from `footprints` — the rock pieces `bonereachToFootprints`
+      // emits are the nav/physics blocking geometry, a different (coarser)
+      // shape than an individual room's own four walls. See
+      // `./gen/bonereach.js`'s own header for the full disclosure on why
+      // nav blocking and visual walls are built from two different data
+      // shapes here.
+      const wallSegments = buildBonereachWallSegments(bonereachLayout);
+      const geomResult = buildBonereachGeometry(this._ctx, bonereachLayout, wallSegments, bonereachDressing.props);
+      this._bonereachGeometryGroup = geomResult.group;
+    }
 
     if (this._physics) {
       for (let i = 0; i < footprints.length; i++) {
@@ -477,6 +869,23 @@ export class WorldSystem {
     const halfZ = descriptor.sizeZ / 2;
     const bounds = { minX: -halfX, minZ: -halfZ, maxX: halfX, maxZ: halfZ };
 
+    const entries = new Map();
+    const chests = [];
+    if (isWastes) {
+      entries.set('portal_from_town', wastesEntries.entries.portal_from_town);
+      entries.set('descent_return', wastesEntries.entries.descent_return);
+      for (const c of wastesEntries.chests) chests.push(c);
+    }
+    if (isBonereach) {
+      // `descriptor.entryTags` (SHIPPED zones.js: ['descent','altar_return'])
+      // — see `./gen/bonereach.js`'s own header for the full spec-vs-shipped
+      // disclosure on why these tag names differ from `07` §4.2 B10's own
+      // literal ('descent'/'ascent_return'/'portal_return').
+      entries.set('descent', bonereachEntries.descent);
+      entries.set('altar_return', bonereachEntries.altar_return);
+      for (const c of bonereachChests) chests.push(c);
+    }
+
     const instance = {
       descriptor,
       zoneId,
@@ -491,12 +900,16 @@ export class WorldSystem {
       boundsMaxX: bounds.maxX,
       boundsMaxZ: bounds.maxZ,
 
-      nav: null,
+      // O-99 — populated below, before `nav.rebuild(instance)` runs, so
+      // `passN3Slope` (`src/world/raster.js`) receives a real heightfield
+      // instead of the permanent no-op `nav: null` left it at. See this
+      // file's header and `_buildNavGroundY`'s own comment.
+      nav: this._buildNavGroundY(bounds),
       spawnPoints: [],
       packs: [],
       portals: [],
-      entries: new Map(),
-      chests: [],
+      entries,
+      chests,
 
       cleared: false,
       bossDefeated: false,
@@ -517,9 +930,95 @@ export class WorldSystem {
     const nav = typeof this._ctx.peek === 'function' ? this._ctx.peek('nav') : undefined;
     if (nav && typeof nav.rebuild === 'function') nav.rebuild(instance);
 
+    // WRLD-9 (T10 — Spawning, R11 / `07` §8): runs strictly after
+    // `nav.rebuild(instance)` above — `spawn.js` reads `nav.grid`'s real,
+    // just-rasterised walkable/region data for THIS zone (O-102: `nav`
+    // never computes an entry region itself, `spawn.js` does). Only the two
+    // zones with a real generator take this path (rule 11); every other
+    // zone keeps `spawnPoints`/`packs` at the instance literal's own `[]`.
+    this._spawnReport = null;
+    if (nav && typeof nav.rebuild === 'function' && nav.grid) {
+      if (isWastes) {
+        const result = planWastesSpawns({ descriptor, tier: difficulty, grid: nav.grid, layout: wastesLayout, wastesEntries });
+        instance.spawnPoints = result.spawnPoints;
+        instance.packs = result.packs;
+        this._spawnReport = result.report;
+      } else if (isBonereach) {
+        const result = planBonereachSpawns({ descriptor, tier: difficulty, grid: nav.grid, layout: bonereachLayout, bonereachEntries, chests: bonereachChests });
+        instance.spawnPoints = result.spawnPoints;
+        instance.packs = result.packs;
+        this._spawnReport = result.report;
+      }
+    }
+
     events.emit('zone:ready', { zoneId, bounds, navVersion: instance.navVersion });
 
     return instance;
+  }
+
+  /**
+   * O-99 — builds `ZoneInstance.nav`'s grid-geometry shell + `groundY`
+   * heightfield, sampled from `this._heightField` (already built, above,
+   * for THIS zone) at exactly the cell centres `src/nav/index.js`'s own
+   * `resolveGridGeometry` derives from `zone.boundsMinX/../boundsMaxZ`
+   * (`RASTER.CELL_SIZE`, `Math.round((max-min)/cellSize)`) — matched here
+   * verbatim so this shell agrees with what `nav` would have computed on
+   * its own from the bounds alone, just now WITH a real `groundY` instead
+   * of the `null` that branch leaves `passN3Slope` a permanent no-op on.
+   * Runs for every zone (not only Ashen Wastes) — this is a general nav
+   * correctness fix, not a wastes-specific one; only `ashen_wastes` has any
+   * non-flat terrain yet (WRLD-5's ravines/shelves), so it is the only zone
+   * where this actually changes `passN3Slope`'s behaviour today.
+   * `Alloc: yes` — same "once per enterZone, between frames" cost class as
+   * `buildHeightField` itself.
+   * @param {{minX:number,minZ:number,maxX:number,maxZ:number}} bounds
+   * @returns {{width:number,height:number,originX:number,originZ:number,cellSize:number,groundY:Float32Array}}
+   * @private
+   */
+  _buildNavGroundY(bounds) {
+    const cellSize = RASTER.CELL_SIZE;
+    const width = Math.max(1, Math.round((bounds.maxX - bounds.minX) / cellSize));
+    const height = Math.max(1, Math.round((bounds.maxZ - bounds.minZ) / cellSize));
+    const originX = bounds.minX;
+    const originZ = bounds.minZ;
+    const groundY = new Float32Array(width * height);
+    for (let cz = 0; cz < height; cz++) {
+      const wz = originZ + (cz + 0.5) * cellSize;
+      const row = cz * width;
+      for (let cx = 0; cx < width; cx++) {
+        const wx = originX + (cx + 0.5) * cellSize;
+        groundY[row + cx] = sampleHeightField(this._heightField, wx, wz);
+      }
+    }
+    return { width, height, originX, originZ, cellSize, groundY };
+  }
+
+  /** WRLD-6 — removes and disposes the previous zone's wastes dressing
+   * geometry (the `THREE.Group` `_wastesGeometryGroup` points at), if any.
+   * A narrow slice of T3's "dispose every geometry... of the outgoing
+   * zone" — scoped to exactly what this ticket adds, not a full T3
+   * teardown (out of this ticket's file grant). Safe to call even when
+   * nothing was ever built (bare unit-test `ctx`, non-wastes zones).
+   * @private */
+  _disposeWastesGeometry() {
+    const g = this._wastesGeometryGroup;
+    if (!g) return;
+    if (g.parent) g.parent.remove(g);
+    for (const mesh of g.children) {
+      if (mesh.geometry && typeof mesh.geometry.dispose === 'function') mesh.geometry.dispose();
+    }
+    this._wastesGeometryGroup = null;
+    this._wastesGeometryResult = null;
+  }
+
+  /** WRLD-7 — same discipline as `_disposeWastesGeometry`, for Bonereach's
+   * own geometry group. `disposeBonereachGeometry` (`./build/bonereach.js`)
+   * does the actual removal/traversal; this just clears the field.
+   * @private */
+  _disposeBonereachGeometry() {
+    if (!this._bonereachGeometryGroup) return;
+    disposeBonereachGeometry(this._bonereachGeometryGroup);
+    this._bonereachGeometryGroup = null;
   }
 
   /** Removes every `physics` static handle this subsystem itself added for

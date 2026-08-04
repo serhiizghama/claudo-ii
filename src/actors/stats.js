@@ -31,6 +31,25 @@
 // the action state machine and status-effect application are ACTR-8/9/10 —
 // not this ticket, not touched.
 //
+// ACTR-24 — a `actors -> ai/data` STATIC import, not `ctx.get`. Same
+// category, same precedent, as `src/combat/packet.js`'s CMBT-10/D-59
+// `combat -> skills/data` import (that file's own header: "`SKILLS` is the
+// flat, logic-free, zero-engine-import table... `ARCHITECTURE.md` rule 9
+// exists to make headlessly readable"). `src/ai/data/bestiary.js` is the
+// same category: no imports of its own, no `three`, no clock/RNG, plain
+// frozen objects and pure functions — reading it here is not reaching into
+// `ai`'s live subsystem instance (that would need `ctx`, which this pure,
+// headless module does not take and must not touch), it is reading the one
+// shared data table `ARCHITECTURE.md` rule 9 says exists precisely so a
+// balance harness — and, per this precedent, a sibling subsystem's own pure
+// composition code — can read it without engine wiring. The alternative
+// (copying the six bestiary numbers into a second table in THIS file) is
+// exactly what this ticket's brief forbids ("never re-declare them in
+// stats.js") and is the class of bug `03-combat-math.md`'s own cross-check
+// note in bestiary.js's header exists to prevent (two tables silently
+// drifting apart).
+import { BESTIARY, lifeMult, damageMult, defenseMult, arMult, flatDR } from '../ai/data/bestiary.js';
+
 // ---------------------------------------------------------------------------
 // The class table — why it lives here, not in a data/ file
 // ---------------------------------------------------------------------------
@@ -55,15 +74,26 @@
 // `composeStats` at theirs.
 //
 // A monster actor (`kind !== 'player'`) has `classId === null`
-// (`src/actors/pool.js#acquire`) and no bestiary table exists yet either
-// (`03-combat-math.md`: "Monsters do not use these formulas — their AR,
-// DEF, life and damage come straight from the bestiary row") — AI-owned,
-// not this ticket's. `CLASS_TABLE[null]` falls back to `ZERO_CLASS` (every
-// parameter 0) so `derive()` still runs the full pipeline safely for a
-// monster rather than crashing or branching around it; the resulting
-// numbers are not meaningful until AI/bestiary data lands, exactly the
-// placeholder discipline `src/actors/motion.js#computeMoveSpeed` already
-// uses for the same reason.
+// (`src/actors/pool.js#acquire`), so `CLASS_TABLE[null]` still falls back to
+// `ZERO_CLASS` (every parameter 0) for the four primary attributes and the
+// mana/stamina/rage/resonance/regen fields — monsters have no class table
+// for those, and `01-data-model.md` never gives them one. `derive()` runs
+// the full pipeline safely for a monster rather than crashing or branching
+// around it, exactly the placeholder discipline
+// `src/actors/motion.js#computeMoveSpeed` already uses for the same reason.
+//
+// ACTR-24 closes the other half: `03-combat-math.md` §3 — "Monsters do not
+// use [the player derive() formulas] — their AR, DEF, life and damage come
+// straight from the bestiary row [times the mlvl tables of §10.1]" — is now
+// true. Step 2 below reads `src/ai/data/bestiary.js`'s `BESTIARY[
+// actor.archetypeId]` (never re-declares its numbers here — see that step's
+// own comment) and folds `archetype × mlvlMult(actor.level) × rankMult(
+// actor.rank)`, rounded once with `Math.round` per `03` §10.1's rounding
+// rule, into the flat `base` layer for `maxLife`/`minDamage`/`maxDamage`/
+// `defense`/`attackRating`/`damageReduceFlat`. `derive()` below is guarded
+// (`classRow === ZERO_CLASS`) to skip the two PLAYER-only additive terms
+// (`5 × (DEX − 7)` on AR, `⌊DEX / 4⌋` on DEF) that `03` §3's own text says
+// monsters do not use — see `derive()`'s own comment.
 
 /** `03-combat-math.md` §2.1, the columns this ticket's formulas read, plus
  * `baseRage`/`baseResonance` — §2.1's "secondary resource" row (Ravager:
@@ -119,7 +149,11 @@ const CLASS_TABLE = Object.freeze({
   }),
 });
 
-/** See the file header — the monster/no-class fallback. */
+/** See the file header — the monster/no-class fallback for the four primary
+ * attributes and the mana/stamina/rage/resonance/regen fields. Life/damage/
+ * defense/attackRating/damageReduceFlat are NOT among these — a monster
+ * gets those from the bestiary archetype × mlvl (× rank), folded into the
+ * `base` layer directly in `composeStats` step 2, not from this table. */
 const ZERO_CLASS = Object.freeze({
   baseLife: 0, lifePerVit: 0, lifePerLevel: 0,
   baseMana: 0, manaPerEne: 0, manaPerLevel: 0,
@@ -128,6 +162,23 @@ const ZERO_CLASS = Object.freeze({
   classBaseAR: 0,
   manaRegenRate: 0, lifeRegenRate: 0,
   baseRage: 0, baseResonance: 0, manaReturnPercent: 0,
+});
+
+/** `03-combat-math.md` §9.3, verbatim — the rank multiplier table, "applied
+ * on top of the mlvl tables of §10.1". Only the three columns `composeStats`
+ * step 2 actually multiplies (`life`/`damage`/`defense`) are kept here: §9.3
+ * has NO `AR` column at all (`ar: 1` below is therefore the identity, not an
+ * invented number — mlvl alone scales attack rating for every rank), and
+ * "Phys resist +"/"Elem resists +"/`Affixes`/`ilvl`/`XP ×` are columns this
+ * ticket does not touch (none are the five StatBlock fields ACTR-24's defect
+ * names — see this ticket's report). `damageReduceFlat = ⌊mlvl/8⌋` is "all
+ * ranks" per §9.3's own text, so it has no column here at all. */
+const RANK_MULT = Object.freeze({
+  normal: Object.freeze({ life: 1.0, damage: 1.0, defense: 1.0, ar: 1 }),
+  minion: Object.freeze({ life: 1.6, damage: 1.2, defense: 1.2, ar: 1 }),
+  champion: Object.freeze({ life: 4.0, damage: 1.6, defense: 1.5, ar: 1 }),
+  unique: Object.freeze({ life: 7.0, damage: 2.2, defense: 2.0, ar: 1 }),
+  boss: Object.freeze({ life: 1.0, damage: 1.0, defense: 1.0, ar: 1 }),
 });
 
 // ---------------------------------------------------------------------------
@@ -377,11 +428,27 @@ function applyLayer(block, partial) {
  * file's own binding rule from the ticket brief). `lifeRegen`/`manaRegen`
  * are the two exceptions that `+=` onto their own flat sum rather than
  * replacing it (`01` §4.3's own `+=` in the formula).
+ *
+ * ACTR-24: `03` §3's own text, verbatim — "Monsters do not use these
+ * formulas — their AR, DEF, life and damage come straight from the
+ * bestiary row [× the mlvl tables]." `isMonster` (below) gates exactly the
+ * two PLAYER-only additive terms these formulas otherwise apply on top of
+ * step 2's already-correct flat archetype contribution: `5 × (DEX − 7)` on
+ * `AR` and `⌊DEX / 4⌋` on `DEF`. A monster's `dexterity` is always 0 today
+ * (`ZERO_CLASS.startDex` + `actor.attributes.dexterity`'s pool-record
+ * default, both 0), so the `DEF` term is a no-op either way (`⌊0/4⌋ = 0`)
+ * but the `AR` term is NOT (`5 × (0 − 7) = −35`) — left unguarded it would
+ * silently subtract 35 from step 2's exactly-matched `06` §2.1 figures.
+ * Guarded via `classRow === ZERO_CLASS` (the module-level singleton
+ * `derive()` is always called with for a classless actor — see ZERO_CLASS's
+ * own comment) rather than adding a parameter, so this stays a
+ * signature-preserving fix.
  */
 function derive(block, classRow, level) {
   const vitality = block.vitality;
   const energy = block.energy;
   const dexterity = block.dexterity;
+  const isMonster = classRow === ZERO_CLASS;
 
   const flatMaxLife = block.maxLife;
   const flatMaxMana = block.maxMana;
@@ -397,10 +464,12 @@ function derive(block, classRow, level) {
     + (level - 1) * classRow.manaPerLevel + flatMaxMana) * (1 + block.manaPercent / 100);
   const maxStamina = classRow.baseStamina + vitality * 1.0 + (level - 1) * 1.0 + flatMaxStamina;
 
-  let attackRating = (classRow.classBaseAR + 5 * (dexterity - 7) + flatAR) * (1 + block.attackRatingPercent / 100);
+  const dexArBonus = isMonster ? 0 : 5 * (dexterity - 7);
+  let attackRating = (classRow.classBaseAR + dexArBonus + flatAR) * (1 + block.attackRatingPercent / 100);
   if (attackRating < 0) attackRating = 0; // 01 §4.3: "attackRating clamps to >= 0"
 
-  let defense = flatDefense * (1 + block.defensePercent / 100) + Math.floor(dexterity / 4);
+  const dexDefBonus = isMonster ? 0 : Math.floor(dexterity / 4);
+  let defense = flatDefense * (1 + block.defensePercent / 100) + dexDefBonus;
   if (defense < 0) defense = 0; // 01 §4.3: "defense clamps to >= 0"
 
   block.maxLife = maxLife;
@@ -481,6 +550,39 @@ export function composeStats(actor) {
   base.maxRage = classRow.baseRage;
   base.maxResonance = classRow.baseResonance;
   base.manaReturnPercent = classRow.manaReturnPercent; // O-84/D-53 micro-scope — 03 §2.4
+
+  // ACTR-24 — 01 §4.1's other half of this step: "monsters: archetype × mlvl
+  // tables." `actor.classId === null` is exactly the monster/no-class case
+  // (see ZERO_CLASS's own comment); `BESTIARY[actor.archetypeId]` is only
+  // looked up in that case, never for a real player class, so a player's
+  // `archetypeId` (which doubles as `classId` per pool.js#acquire) can never
+  // collide with a bestiary key. The six fields below are set ONLY when a
+  // matching archetype exists — left absent from `base` otherwise, matching
+  // every other sparse layer's own convention (`applyLayer` only visits a
+  // partial's own keys). This is safe against pool-slot reuse without an
+  // unconditional zero-fill: `pool.js#resetActorRecord` nulls `actor.sources`
+  // on every despawn, so `createEmptySources()` (which does NOT carry these
+  // six keys) rebuilds `base` from scratch the next time this actor record
+  // is spawned into — no recompose of one occupant's `sources.base` object
+  // ever survives into a later, different occupant of the same pool slot.
+  const archetype = actor.classId === null ? BESTIARY[actor.archetypeId] : undefined;
+  if (archetype) {
+    const level = actor.level;
+    const rankRow = RANK_MULT[actor.rank] || RANK_MULT.normal;
+    // 03 §10.1's rounding rule: "computed in float ... rounded ONCE ...
+    // Never round an intermediate." Each product below is exactly one
+    // `Math.round`, matching the spec's own worked check (a level-10
+    // champion bone_ranker: `round(20 × 4.393 × 4.0) = 351`, `03` §11.3).
+    // `difficultyMult` (03 §10.1's fourth factor) is not part of this
+    // product — see this ticket's report for why.
+    base.maxLife = Math.round(archetype.baseLife * lifeMult(level) * rankRow.life);
+    base.minDamage = Math.round(archetype.baseMinDamage * damageMult(level) * rankRow.damage);
+    base.maxDamage = Math.round(archetype.baseMaxDamage * damageMult(level) * rankRow.damage);
+    base.defense = Math.round(archetype.baseDefense * defenseMult(level) * rankRow.defense);
+    base.attackRating = Math.round(archetype.baseAttackRating * arMult(level) * rankRow.ar);
+    base.damageReduceFlat = flatDR(level); // 03 §9.3: "all ranks" — no rank factor
+  }
+
   applyLayer(block, base);
   steps++;
 

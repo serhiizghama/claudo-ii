@@ -113,6 +113,7 @@ import { Rng } from './core/rng.js';
 import { createConfig } from './core/config.js';
 import { prewarm } from './core/prewarm.js';
 import { RenderSystem } from './render/index.js';
+import { MaterialsSystem } from './materials/index.js';
 import { buildWorldCamera as buildWorldCameraRig } from './render/camera.js';
 import { PhysicsSystem } from './physics/index.js';
 import { WorldSystem } from './world/index.js';
@@ -442,6 +443,7 @@ export async function boot(opts = {}) {
   // an import and one `registry.add(...)` call — and nothing else. `render`
   // (RNDR-1) is the first:
   registry.add(RenderSystem);
+  registry.add(MaterialsSystem);
   registry.add(PhysicsSystem);
   registry.add(WorldSystem);
   registry.add(ActorsSystem);

@@ -186,6 +186,12 @@ test('last_stand: a hit larger than life + absorb still kills the actor (system-
   packet.physMax = packet.physMin;
   packet.team = 1;
   packet.attackRating = 0;
+  // Pin the crit roll too, not just to-hit — MATL-1 registering `materials`
+  // shifted every later subsystem's `ctx.rng.fork()` index, which moves
+  // where this file's combat rolls land in the stream. Outcome here is
+  // invariant to crit (the hit is already life+absorb+500), but pinning it
+  // keeps this packet from consuming/depending on an unpinned roll anyway.
+  packet.critChance = 0;
   const result = combat.resolve(packet, player);
   combat.releasePacket(packet);
 
@@ -216,6 +222,13 @@ test('smouldering_ward: re-applying refreshes the pool in place, discarding the 
   const packet = combat.buildAttackPacket(attacker, 'attack');
   packet.physMin = 20; packet.physMax = 20;
   packet.team = 1; packet.attackRating = 0;
+  // Pin the crit roll, not just to-hit — MATL-1 registering `materials`
+  // shifted every later subsystem's `ctx.rng.fork()` index, which moved
+  // this hit's crit roll from false to true (40 absorbed instead of 20),
+  // draining the pool to 5 instead of 25 below. attackRating=0 already
+  // declares "pin to-hit"; this line pins the other roll the assertion was
+  // silently depending on.
+  packet.critChance = 0;
   combat.resolve(packet, player);
   combat.releasePacket(packet);
   approx(skills.absorbRemaining(player), 25, '45 - 20 spent');

@@ -372,6 +372,27 @@ test('ITMS.E17: equip() populates item._cache.weapon (D-21 — resolveWeapon\'s 
   assert.equal(axe._cache.weapon.maxDamage, 22);
   assert.equal(axe._cache.weapon.attackTime, 0.75);
   assert.equal(axe._cache.weapon.handling, 'oneHandMelee');
+  // O-94 cause 1 — `11-flows.md` §3.6 step 3 reads this field. It was missing
+  // from the view for four milestones, so every actor swung at the unarmed
+  // 1.4 m and the M4 gate's "each class clears the room" measured reach, not
+  // damage. `axe_battle_normal`'s base range is 1.9 m.
+  assert.equal(axe._cache.weapon.range, 1.9, 'the weapon view must carry base range (O-94 cause 1)');
+});
+
+test('ITMS.E17b: weaponRangeOf reads the equipped weapon\'s reach, not the unarmed literal (O-94 cause 1)', async () => {
+  const { weaponRangeOf, UNARMED_RANGE_M } = await import('../../src/player/cast.js');
+  const ctx = await makeCtx();
+  const items = ctx.get('items');
+  const actor = spawnPlayer(ctx, { level: 20 });
+  actor.attributes.strength = 60;
+
+  assert.equal(weaponRangeOf(items, actor), UNARMED_RANGE_M, 'bare-handed actor keeps the unarmed reach');
+
+  const axe = makeItem('axe_battle_normal');
+  assert.equal(items.equip(actor, axe, 'mainHand').ok, true);
+  const armed = weaponRangeOf(items, actor);
+  assert.equal(armed, 1.9);
+  assert.ok(armed > UNARMED_RANGE_M, 'equipping a real weapon must extend reach past the unarmed fallback');
 });
 
 // ---------------------------------------------------------------------------

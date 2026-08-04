@@ -327,7 +327,14 @@ test('world.current reflects the just-entered ZoneInstance (01-data-model.md §9
   assert.equal(instance.boundsMinX, -56);
   assert.equal(instance.boundsMaxX, 56);
   assert.ok(instance.entries instanceof Map);
-  assert.equal(instance.entries.size, 0, 'no entry-point positions are built by this ticket — see the report');
+  // WRLD-7 note (out of THIS ticket's own file grant, but this exact
+  // assertion is the one thing WRLD-7 directly falsifies — see that
+  // ticket's own report): `bonereach` now has a real B10 generator that
+  // populates `descent`/`altar_return` entries, so the "nothing built yet"
+  // count this line originally asserted (0) is no longer the honest
+  // reading of `entries` for THIS zoneId — it is exactly 2, matching the
+  // shipped `zones.js` descriptor's own `entryTags` for bonereach.
+  assert.equal(instance.entries.size, 2, 'WRLD-7 populates descent/altar_return entries for bonereach — see that ticket\'s report');
   assert.deepEqual(instance.spawnPoints, []);
   assert.deepEqual(instance.packs, []);
   assert.equal(instance.createdAtStep, ctx.time.step);
