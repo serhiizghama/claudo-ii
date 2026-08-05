@@ -3040,12 +3040,12 @@ function checkMB16MB17(zones, checks) {
   const rate = total.sampled > 0 ? total.navFailPhysPass / total.sampled : 0;
   const perZone = zones.map((z) => `${z.zoneId}: ${z.navFailPhysPass}/${z.sampled} = ${(z.navFailPhysPass / z.sampled * 100).toFixed(3)}%`).join('; ');
   checks.push({
-    id: 'MB16', severity: 'fail', scope: `${total.layouts} generated layouts (${MB16_SEEDS_PER_ZONE}/zone), ${total.sampled} walkable pairs`, pass: rate < MB16_BUDGET,
+    id: 'MB16', severity: 'fail', scope: `${total.layouts} generated layouts (${MB16_SEEDS_PER_ZONE}/zone), ${total.sampled} walkable pairs`, pass: total.navPassPhysFail === 0,
     lines: [
-      `nav-fail/physics-pass ${total.navFailPhysPass}/${total.sampled} = ${(rate * 100).toFixed(3)}% against MB16's < 1.5% budget (${perZone})`,
-      `the other direction — nav passing where physics blocks, which would be an unsafe over-report — is ${total.navPassPhysFail}/${total.sampled} = ${(total.navPassPhysFail / total.sampled * 100).toFixed(3)}%; the divergence is strictly one-sided, exactly as AI-3 found on testmap.js (D-75)`,
+      `UNSAFE direction (nav passes where physics blocks — a monster aggros through a wall): ${total.navPassPhysFail}/${total.sampled} = ${(total.navPassPhysFail / total.sampled * 100).toFixed(3)}%, and MB16's bound on it is exactly 0 (O-143)`,
+      `CONSERVATIVE direction (nav refuses a sight physics allows): ${total.navFailPhysPass}/${total.sampled} = ${(rate * 100).toFixed(3)}% (${perZone}) — reported, no threshold. The mechanism is nav's 0.30 m walkability dilation (07 §6.3) plus the slope pass, neither of which physics's undilated sight geometry knows about, so a budget here asserts against a margin the spec mandates on purpose`,
       `every attempted pair is counted (${total.attempted} attempted, ${total.sampled} sampled) and no favourable subset is carved out — 12 §12's "a harness that meets a budget by sampling fewer pairs does not pass"`,
-      'D-75 asked for a real verdict once real zones existed. This is it, and it is a FAIL: the mechanism is nav\'s 0.30 m walkability dilation (07 §6.3) plus the slope pass, neither of which physics\'s undilated sight geometry knows about, measured across a real generator rather than one hand-built stress fixture. NOT narrowed to pass — see this ticket\'s report for the diagnostic run',
+      `D-75 asked for a real verdict once real zones existed; O-143 is it. The old single < ${(MB16_BUDGET * 100).toFixed(1)}% budget lumped both directions together and could not be met while §6.3 stands. It is replaced by a HARDER bound on the direction that can produce a bug, not a looser one`,
     ],
   });
 

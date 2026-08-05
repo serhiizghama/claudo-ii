@@ -310,7 +310,11 @@ test('balance.mjs --monsters: MB16/MB17 are real measurements over generated zon
     assert.ok(c.status === 'pass' || c.status === 'fail', `${c.id} must be a real verdict now that src/world/gen/ exists (D-75), got '${c.status}'`);
     assert.match(c.scope, /layouts/, `${c.id}'s scope must state how many generated layouts it measured`);
   }
-  assert.match(mb16.detail, /nav-fail\/physics-pass/);
+  // O-143 split MB16 into its two directions. Both must stay printed: the
+  // unsafe one because it is the assertion, the conservative one because
+  // dropping its threshold is only honest while its number stays visible.
+  assert.match(mb16.detail, /UNSAFE direction/);
+  assert.match(mb16.detail, /CONSERVATIVE direction/);
   assert.match(mb17.detail, /SPAWN_PUSHED = /);
 });
 

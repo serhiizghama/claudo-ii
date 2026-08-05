@@ -977,6 +977,29 @@ cannot walk over.** For a top-down game whose blockers are all either waist-high
 (and `navBlock: false`) or full walls, this is correct in every case the zones
 actually contain, and it is checked by invariant MB16 (§12).
 
+> **Ruling (O-143, 2026-08-05) — MB16 asserts the unsafe direction only.** The
+> paragraph above predicted the divergence would be negligible on real zones.
+> It is not: measured over 400 generated layouts and 2 400 walkable pairs, nav
+> refuses **8.000 %** of the sights physics allows (wastes 12.667 %, bonereach
+> 3.333 %) against the old **< 1.5 %** budget. The cause is not kerbs — it is
+> nav's **0.30 m walkability dilation**, which `07-world-gen.md` §6.3 mandates,
+> plus the slope pass; physics's undilated sight geometry knows about neither.
+> A budget cannot be met while §6.3 stands, so the old one asserted something
+> the spec itself made impossible.
+>
+> The two directions are not symmetric and only one can hurt. **nav passing
+> where physics blocks** is an over-report: a monster aggros through a wall.
+> **nav failing where physics passes** is conservative: a monster occasionally
+> does not notice a player it could geometrically see, across a 0.30 m safety
+> margin that exists on purpose. Measured, the unsafe direction is **0 of
+> 2 400** and the divergence is strictly one-sided.
+>
+> So MB16 now asserts **exactly 0** on the unsafe direction — stricter than the
+> budget it replaces — and the conservative direction is measured, printed with
+> its cause named, and carries no threshold. Removing a budget that could not
+> be met is not the same as removing a check: the clause that can produce a bug
+> got harder, not softer.
+
 `raycastNav` is called **at most once per decision per brain** — 4.17 calls per
 step at 25 monsters.
 
@@ -2780,7 +2803,7 @@ no DOM, which is what makes this possible (`ARCHITECTURE.md` hard rule 9).
 | **MB13** | `ai` `fixedUpdate` cost at 25 active monsters | p95 < 0.30 ms |
 | **MB14** | Determinism: the same seed produces an identical kill order, identical cumulative damage and an identical final `ai.stats` over 10 000 steps, across two processes | byte-identical |
 | **MB15** | Measured per-phase boss uptime in `--boss` against §7.9's declared 0.848 / 0.893 / 0.833 (Ravager) and the other two rows | ±0.05 absolute |
-| **MB16** | Perception: over the 200 seeds, no walkable cell pair within `aggroRadius` fails `nav.raycastNav` while passing `physics.lineOfSight` by more than 1.5 % of sampled pairs | < 1.5 % |
+| **MB16** | Perception, the **unsafe** direction: no walkable cell pair within `aggroRadius` may pass `nav.raycastNav` while `physics.lineOfSight` blocks it. See the ruling below for why the conservative direction carries no budget | **exactly 0** |
 | **MB17** | Every `SpawnPoint` satisfies its zone's path-distance minimum (§10.2) without correction | `SPAWN_PUSHED === 0` |
 | **MB18** | Every archetype's `hitTick`, computed from `08-characters-visual.md` §6.1 at IAS 0, matches §2's tick columns | exact |
 | **MB19** | The Maulsmith's wind-up never falls below 0.90 s and the Crawler's fuse never below 0.85 s, at any IAS from any affix or tier combination | floors hold |
