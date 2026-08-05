@@ -111,7 +111,10 @@ export const ZONE_DESCRIPTORS = Object.freeze([
     densityTarget: 0.014, // ASSIGNED
     champChance: 0.18, // ASSIGNED
     uniqueChance: 0.05, // ASSIGNED
-    bestiary: Object.freeze([]), // ASSIGNED empty — real bestiary is 06-monsters-ai.md's data, not read for this ticket
+    // 07 §4.1, verbatim. `maulsmith` is listed there as `hammerfell_brute` —
+    // the same archetype under its pre-D-2 name (06 §15 D-2, §5.4).
+    bestiary: Object.freeze(['bone_ranker', 'ashen_archer', 'dust_shaman', 'maulsmith',
+      'blight_crawler', 'carrion_swarm']),
     surfaces: Object.freeze(['stone', 'bone', 'dirt', 'water']),
     lightingPreset: 'bonereach_dark', // ASSIGNED
     fogPreset: 'bonereach', // ASSIGNED
@@ -140,7 +143,7 @@ export const ZONE_DESCRIPTORS = Object.freeze([
     densityTarget: 0, // ASSIGNED — fixed arena, not density-placed
     champChance: 0, // ASSIGNED
     uniqueChance: 0, // ASSIGNED
-    bestiary: Object.freeze([]), // ASSIGNED empty — boss id is 06-monsters-ai.md's data, not read for this ticket
+    bestiary: Object.freeze(['bone_ranker', 'ashen_archer']), // 07 §5.1, verbatim — the approach packs; Molgrim himself is M6
     surfaces: Object.freeze(['stone', 'ash', 'bone']),
     lightingPreset: 'altar_instruction', // ASSIGNED
     fogPreset: 'altar', // ASSIGNED

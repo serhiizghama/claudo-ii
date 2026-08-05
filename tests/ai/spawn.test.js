@@ -239,32 +239,33 @@ test('MB20: Ashen Wastes PASSES against the SHIPPED src/world/data/zones.js best
   console.log(`  MB20 ashen_wastes: PASS — 5/5 referenced archetypes present in the shipped bestiary`);
 });
 
-test('MB20 FAILS on Bonereach and the Altar — pinned to the exact shipped state, NOT fixed here (src/world/data/zones.js is outside this ticket\'s grant)', () => {
-  // Two independent defects stack here:
-  //  1. The SHIPPED zones.js ships `bestiary: Object.freeze([])` for both
-  //     zones ("real bestiary is 06's data, not read for this ticket
-  //     [WRLD-1]"), so MB20 fails on every archetype.
-  //  2. Even against `07-world-gen.md` §4.1's own PROSE list, Bonereach fails
-  //     on exactly one token — `maulsmith` vs `hammerfell_brute` — which is
-  //     `06` §15 D-2's own prediction, verbatim: "07 §4.1's array needs the
-  //     one-token correction; until it is made, MB20 fails on Bonereach,
-  //     which is the correct behaviour for an id mismatch."
+test('MB20: every archetype Bonereach and Altar templates reference is in the SHIPPED descriptor bestiary', () => {
+  // This test used to pin the opposite — both bestiaries shipped
+  // `Object.freeze([])` ("real bestiary is 06's data, not read for this
+  // ticket [WRLD-1]") and MB20 failed on every archetype. Filled from
+  // `07` §4.1 / §5.1 (O-139). The one token those arrays do NOT give
+  // literally is `maulsmith`, printed there as `hammerfell_brute`; `06`
+  // §15 D-2 is the standing resolution and §5.4 names it, so the shipped
+  // id is what the templates use.
   const bonereachUsed = [...new Set(ALL_TEMPLATE_IDS.filter((t) => TEMPLATE_ZONE[t] === 'bonereach').flatMap(templateArchetypeIds))];
   const altarUsed = [...new Set(ALL_TEMPLATE_IDS.filter((t) => TEMPLATE_ZONE[t] === 'altar_of_instruction').flatMap(templateArchetypeIds))];
 
-  assert.deepEqual([...ZONE_DESCRIPTORS_BY_ID.bonereach.bestiary], [],
-    'if this now fails, zones.js grew a real Bonereach bestiary and MB20 must be re-measured');
-  assert.deepEqual([...ZONE_DESCRIPTORS_BY_ID.altar_of_instruction.bestiary], [],
-    'if this now fails, zones.js grew a real Altar bestiary and MB20 must be re-measured');
   assert.equal(bonereachUsed.length, 6, 'Bonereach templates reference 6 archetypes');
   assert.equal(altarUsed.length, 2, 'Altar templates reference 2 archetypes');
 
+  const bonereachShipped = [...ZONE_DESCRIPTORS_BY_ID.bonereach.bestiary];
+  const altarShipped = [...ZONE_DESCRIPTORS_BY_ID.altar_of_instruction.bestiary];
+  assert.deepEqual(bonereachUsed.filter((a) => !bonereachShipped.includes(a)), [], 'MB20 bonereach: no template archetype may be missing from the shipped bestiary');
+  assert.deepEqual(altarUsed.filter((a) => !altarShipped.includes(a)), [], 'MB20 altar: no template archetype may be missing from the shipped bestiary');
+
+  // D-2 stays measured rather than assumed: the mismatch is exactly one
+  // token, and it is the one the ruling names.
   const specProse = { bonereach: ['bone_ranker', 'carrion_swarm', 'ashen_archer', 'dust_shaman', 'blight_crawler', 'hammerfell_brute'], altar_of_instruction: ['bone_ranker', 'ashen_archer'] };
   assert.deepEqual(bonereachUsed.filter((a) => !specProse.bonereach.includes(a)), ['maulsmith'], 'D-2, exactly: one token');
-  assert.deepEqual(altarUsed.filter((a) => !specProse.altar_of_instruction.includes(a)), [], 'the Altar would PASS the moment zones.js carries 07 §5.1\'s own list');
+  assert.deepEqual(altarUsed.filter((a) => !specProse.altar_of_instruction.includes(a)), []);
 
-  console.log('  MB20 bonereach: FAIL — shipped bestiary is [], all 6 missing; against 07 §4.1 prose, exactly 1 missing (maulsmith/hammerfell_brute — D-2)');
-  console.log('  MB20 altar_of_instruction: FAIL — shipped bestiary is [], both missing; against 07 §5.1 prose it would PASS');
+  console.log(`  MB20 bonereach: PASS — ${bonereachUsed.length}/${bonereachUsed.length} template archetypes present in the shipped bestiary [${bonereachShipped.join(', ')}]`);
+  console.log(`  MB20 altar_of_instruction: PASS — ${altarUsed.length}/${altarUsed.length} present in [${altarShipped.join(', ')}]`);
 });
 
 // ===========================================================================
@@ -589,14 +590,13 @@ test('SWEEP (REAL PIPELINE): Ashen Wastes — 60 real enterZone calls spawn real
   console.log(`  MB17 ashen_wastes (REAL world.enterZone x${runs}): SPAWN_PUSHED=${pushed}, packs=${packs}, monsters=${monsters}, refused=${refused}, PACK_SIZE_RAISED=${raised}`);
 });
 
-test('SWEEP (REAL PIPELINE): Bonereach — the spawn pass runs but spawns NOTHING, because every PackDescriptor.archetypeId is null', async () => {
-  // Not a defect in this file: `src/world/data/zones.js` ships
-  // `bonereach.bestiary = []` (WRLD-1's own "ASSIGNED empty" note), and
-  // `src/world/spawn.js` therefore guards step 2 and leaves
-  // `p.archetypeId = null` on every Bonereach pack — its own header discloses
-  // exactly this. Both files are outside this ticket's grant. The consequence
-  // is measured here so it cannot be mistaken for AI-7 working: **Bonereach
-  // is monster-free in the shipped tree**, and its MB17 zero is VACUOUS.
+test('SWEEP (REAL PIPELINE): Bonereach spawns — every PackDescriptor resolves an archetype and becomes monsters', async () => {
+  // This test used to measure the opposite and call it out loudly:
+  // `src/world/data/zones.js` shipped `bonereach.bestiary = []`, so
+  // `src/world/spawn.js` guarded step 2, left `p.archetypeId = null` on every
+  // pack, and Bonereach was monster-free in the shipped tree — which made its
+  // MB17 zero VACUOUS. The bestiary is filled from `07` §4.1 now (O-139), so
+  // the same measurement is kept and the expectation inverted.
   let nullArchetypes = 0;
   let packDescriptors = 0;
   let monsters = 0;
@@ -611,10 +611,10 @@ test('SWEEP (REAL PIPELINE): Bonereach — the spawn pass runs but spawns NOTHIN
     monsters += ai.spawnStats.monstersSpawned;
     pushed += ai.spawnStats.spawnPushed;
   }
-  assert.equal(nullArchetypes, packDescriptors, 'EVERY Bonereach pack carries archetypeId: null');
-  assert.equal(monsters, 0, 'and so nothing spawns');
-  assert.equal(pushed, 0);
-  console.log(`  bonereach (REAL world.enterZone x${runs}): ${packDescriptors} PackDescriptors, ${nullArchetypes} with archetypeId=null, ${monsters} monsters spawned -> MB17=0 is VACUOUS here`);
+  assert.equal(nullArchetypes, 0, 'no Bonereach pack may carry archetypeId: null once the bestiary is real');
+  assert.ok(monsters > 0, `Bonereach must actually spawn — got ${monsters} monsters over ${runs} zones`);
+  assert.equal(pushed, 0, 'MB17: SPAWN_PUSHED must stay 0 now that the zero is no longer vacuous');
+  console.log(`  bonereach (REAL world.enterZone x${runs}): ${packDescriptors} PackDescriptors, ${nullArchetypes} with archetypeId=null, ${monsters} monsters spawned, SPAWN_PUSHED=${pushed} -> MB17=0 is REAL here`);
 });
 
 test('REAL PIPELINE: the spawn pass fills PackDescriptor.members/spawned/aliveCount with DISTINCT refs (01 §9.5)', async () => {
@@ -743,16 +743,20 @@ test('REAL PIPELINE: §10.5 — entering a second zone despawns every monster of
   const { world, ai, actors } = await bootFullEngine(7006);
   world.setWorldSeed(0x5eed0006);
   await world.enterZone('ashen_wastes', 'portal_from_town', { runIndex: 0 });
-  const first = actors.all.filter((a) => a.kind === 'monster').length;
+  const firstIds = new Set(actors.all.filter((a) => a.kind === 'monster').map((a) => a.id));
+  const first = firstIds.size;
   assert.ok(first > 0);
-  // Bonereach spawns nothing (see the Bonereach sweep above), so whatever
-  // survives this call is leakage from the Wastes, which is exactly the
-  // thing §10.5 row 1 exists to prevent.
+  // This used to read "whatever survives is leakage", because Bonereach
+  // spawned nothing and a bare count was therefore an honest test. Bonereach
+  // spawns for real now (O-139), so leakage is identified by IDENTITY rather
+  // than by the second zone happening to be empty — a stricter test, and one
+  // that does not quietly stop testing anything if a zone changes.
   await world.enterZone('bonereach', 'descent', { runIndex: 0 });
+  const survivors = actors.all.filter((a) => a.kind === 'monster' && firstIds.has(a.id));
   const after = actors.all.filter((a) => a.kind === 'monster').length;
-  assert.equal(after, 0, `zone change must despawn all ${first} Wastes monsters, ${after} left`);
-  assert.equal(ai.aliveCount, 0);
-  console.log(`  §10.5 (REAL enterZone -> zone:teardown): ${first} monsters spawned, ${after} left after the zone change`);
+  assert.equal(survivors.length, 0, `zone change must despawn all ${first} Wastes monsters, ${survivors.length} of them are still live`);
+  assert.equal(ai.aliveCount, after, 'ai.aliveCount must account for exactly the second zone\'s monsters');
+  console.log(`  §10.5 (REAL enterZone -> zone:teardown): ${first} Wastes monsters spawned, 0 survived the change, ${after} Bonereach monsters now live`);
 });
 
 test('REAL PIPELINE: the pack registry does not accumulate stale members across five consecutive zone loads', async () => {

@@ -286,14 +286,14 @@ test('SWEEP (REAL PIPELINE): Bonereach — 600 layouts through actual world.ente
   // eslint-disable-next-line no-console
   console.log(`[WRLD-9 SWEEP bonereach] SPAWN_PUSHED total across all members, all layouts: ${spawnPushedTotal}`);
   // eslint-disable-next-line no-console
-  console.log(`[WRLD-9 SWEEP bonereach] archetypeId === null (shipped descriptor.bestiary is [] — see spawn.js header): ${nullArchetypeCount}/${totalPacks} packs`);
+  console.log(`[WRLD-9 SWEEP bonereach] archetypeId === null (was ALL of them while the shipped bestiary was [] — O-139 filled it): ${nullArchetypeCount}/${totalPacks} packs`);
   // eslint-disable-next-line no-console
   console.log('[WRLD-9 SWEEP bonereach] mlvl offsets observed:', Array.from(tierOffsetsSeen));
 
   assert.equal(uniqueOneCount, ran, 'exactly one unique per layout must hold on every layout');
   assert.equal(deadEndOkCount, ran, 'every vault room must hold a champion or the unique on every layout');
   assert.equal(spawnPushedTotal, 0, 'MB17: SPAWN_PUSHED must be 0 across the whole sweep');
-  assert.equal(nullArchetypeCount, totalPacks, 'every Bonereach pack must have archetypeId===null given the shipped empty descriptor.bestiary — see spawn.js header');
+  assert.equal(nullArchetypeCount, 0, 'no Bonereach pack may carry archetypeId===null now that the shipped descriptor.bestiary is real (O-139)');
   assert.deepEqual(Array.from(tierOffsetsSeen), [0], 'every pack must read mlvl = descriptor.monsterLevel + 0 at Instruction');
   assert.equal(within2pct, ran, `Bonereach density must land within ±2% on every layout — off by more than 2% on ${ran - within2pct}/${ran}`);
 });
