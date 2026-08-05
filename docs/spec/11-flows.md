@@ -353,7 +353,7 @@ T3–T9 of [§9](#9-zone-transition) are skipped entirely and only T10–T15 run
 
 Entering a **field** zone directly (a loaded save whose `currentZone` is
 `ashen_wastes`) runs the full T1–T15 and costs 357–431 ms of black window inside
-the constant 1 100 ms transition envelope.
+the constant 1 300 ms transition envelope (O-142).
 
 ### 1.7 Total
 
@@ -1399,18 +1399,22 @@ states the fate of everything that was in the old zone.
 ### 9.1 The envelope
 
 ```
- 0 ms                350 ms                                 1 100 ms
-   ├── fade to black ──┼─── black: teardown + generate ────────┼── fade in ──▶ playable
-        350 ms                    600 ms (padded, constant)         350 ms
+ 0 ms                350 ms                     950 ms           1 300 ms
+   ├── fade to black ──┼─── black: teardown + generate ──┼── fade in ──▶ playable
+        350 ms                600 ms (padded, constant)      350 ms
 
    control disabled ◀────────────────────────────────────────────────▶ control enabled
    input DROPPED, never queued
 ```
 
-**Target ≤ 1 100 ms wall clock. Hard fail 2 500 ms**, logged with a per-stage
+**Target ≤ 1 300 ms wall clock. Hard fail 2 500 ms**, logged with a per-stage
 breakdown to the console and to `render.stats`. There is **no loading screen** —
-a loading screen advertises a wait; a 1.1 s black with a fade at each end reads
+a loading screen advertises a wait; a short black with a fade at each end reads
 as a cut, and the whole point of a town portal is that going home is cheap.
+
+The total was written as 1 100 ms until **O-142** (2026-08-05): the same three
+segments were printed beside it and sum to 1 300. `07-world-gen.md` §10.1
+carries the ruling and the measurement.
 
 The black window is **padded to a constant 600 ms** even when generation
 finishes in 357 ms, so the pacing is identical on a fast machine and a slow one.

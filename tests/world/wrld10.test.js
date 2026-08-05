@@ -105,16 +105,18 @@ function killPack(ctx, actors, pack) {
 // 1 — the envelope (§10.1)
 // ===========================================================================
 
-test('WRLD-10 §10.1: the envelope is 350 / 600 / 350, and §10.1\'s own "total" does not sum to it', () => {
+test('WRLD-10 §10.1: the envelope is 350 / 600 / 350 and its total is their sum', () => {
   assert.equal(TRANSITION_MS.fadeOut, 350);
   assert.equal(TRANSITION_MS.black, 600);
   assert.equal(TRANSITION_MS.fadeIn, 350);
   assert.equal(TRANSITION_MS.hardFail, 2500);
-  // The discrepancy is real and is reported, not papered over: §10.1 prints
-  // "Target total: <= 1 100 ms" beside stage numbers that sum to 1 300.
+  // Until O-142 this asserted the opposite: §10.1 printed "Target total:
+  // <= 1 100 ms" beside stage numbers summing to 1 300, and the mismatch was
+  // pinned rather than hidden. The ruling made the stages authoritative, so
+  // there is one total now and `statedTotal` is gone.
   assert.equal(TRANSITION_MS.envelopeTotal, TRANSITION_MS.fadeOut + TRANSITION_MS.black + TRANSITION_MS.fadeIn);
-  assert.equal(TRANSITION_MS.statedTotal, 1100);
-  assert.notEqual(TRANSITION_MS.envelopeTotal, TRANSITION_MS.statedTotal);
+  assert.equal(TRANSITION_MS.envelopeTotal, 1300);
+  assert.equal(TRANSITION_MS.statedTotal, undefined, 'O-142 removed the second total');
 });
 
 test('WRLD-10 §10.1/§10.2: beginTransition -> update() drives fade-out, a constant-600 ms black, fade-in — and the zone change goes through the WRLD-4 latch, not a second enterZone', async () => {
@@ -651,13 +653,13 @@ test('WRLD-10 ACCEPTANCE (07 §12 row 11): town -> wastes -> portal to town -> r
   }
   // eslint-disable-next-line no-console
   console.log(`    ALL LEGS  min=${all[0].toFixed(1)}  p50=${p(0.5).toFixed(1)}  p95=${p(0.95).toFixed(1)}  max=${all[all.length - 1].toFixed(1)} ms`
-    + `   (budget: black window <= ${TRANSITION_MS.black} ms, leg <= ${TRANSITION_MS.statedTotal} ms)`);
+    + `   (budget: black window <= ${TRANSITION_MS.black} ms, leg <= ${TRANSITION_MS.envelopeTotal} ms)`);
   // eslint-disable-next-line no-console
   console.log('    hardware-dependent: one machine, Node, no GPU — T7\'s buffer uploads do not happen headlessly (07 §10.3 budgets T7 at 214 ms alone)\n');
 
   const worst = all[all.length - 1];
   assert.ok(worst <= TRANSITION_MS.black, `every leg's enterZone must fit the ${TRANSITION_MS.black} ms black window; worst was ${worst.toFixed(1)} ms`);
-  assert.ok(worst <= TRANSITION_MS.statedTotal, `and the <= ${TRANSITION_MS.statedTotal} ms per-leg target; worst was ${worst.toFixed(1)} ms`);
+  assert.ok(worst <= TRANSITION_MS.envelopeTotal, `and the <= ${TRANSITION_MS.envelopeTotal} ms per-leg target; worst was ${worst.toFixed(1)} ms`);
   assert.ok(monstersSpawned > 0, `ai really ran on these transitions (${monstersSpawned} monsters spawned across the ten laps)`);
   void t;
 });

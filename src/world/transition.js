@@ -115,20 +115,15 @@
  * `07` §10.1's envelope, in milliseconds.
  *
  * ---------------------------------------------------------------------------
- * §10.1's three stage numbers do not add up to its own stated total
+ * §10.1's three stage numbers did not add up to its own stated total
  * ---------------------------------------------------------------------------
- * §10.1 draws the envelope as `350 | 600 | 350` and then says **"Target
- * total: <= 1 100 ms wall clock"**, and §10.3 repeats "the observed
- * transition is 1 100 ms regardless of the zone — the black window is padded
- * to a constant 600 ms". `350 + 600 + 350 = 1300`, not 1100; the ASCII ruler
- * in §10.1 is inconsistent with its own segment labels too (its ticks are at
- * 0 / 350 / 1100, which would make the black window 400 ms).
- *
- * This file implements the three STAGE numbers literally — they are stated
- * twice, in two sections, and §10.3's "padded to a constant 600 ms" is
- * unambiguous — and exposes `statedTotal` (§10.1's 1 100 ms) separately from
- * `envelopeTotal` (what the three stages actually sum to) rather than
- * silently picking one and hiding the discrepancy. Reported.
+ * §10.1 drew the envelope as `350 | 600 | 350` and then said "Target total:
+ * <= 1 100 ms", with a ruler whose ticks (0 / 350 / 1 100) implied a 400 ms
+ * black window — three numbers, no two consistent. This file implemented the
+ * three STAGE numbers literally and exposed both totals rather than picking
+ * one quietly. **O-142 ruled the stages correct and 1 100 an arithmetic
+ * slip**; §10.1 and §10.3 now say 1 300, so `statedTotal` is gone and there
+ * is one total again.
  *
  * `hardFail` is §10.1's "Hard fail: 2 500 ms".
  *
@@ -141,10 +136,8 @@ export const TRANSITION_MS = Object.freeze({
   fadeOut: 350,
   black: 600,
   fadeIn: 350,
-  /** What the three stages above actually sum to. */
+  /** §10.1's "Target total", and what the three stages sum to (O-142). */
   envelopeTotal: 1300,
-  /** §10.1's own printed "Target total", which they do not sum to. */
-  statedTotal: 1100,
   hardFail: 2500,
 });
 

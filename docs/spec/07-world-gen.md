@@ -2279,18 +2279,27 @@ Per-zone totals:
 **No loading screen. A fade.** The transition is:
 
 ```
- 0 ms                350 ms                              1 100 ms
-   ├── fade to black ──┼── black: teardown + generate ──────┼── fade in ──→ playable
-        350 ms                    600 ms budget                  350 ms
+ 0 ms                350 ms                    950 ms          1 300 ms
+   ├── fade to black ──┼── black: teardown + generate ──┼── fade in ──→ playable
+        350 ms                  600 ms budget               350 ms
 ```
+
+> **Ruling (O-142, 2026-08-05) — the total is 1 300 ms, not 1 100.** This
+> diagram used to label the second boundary `1 100 ms` while also printing
+> segments of 350 / 600 / 350, which sum to 1 300 and put the black window's
+> end at 950, not 1 100. Three numbers, no two consistent. The segments win:
+> they are what §10.3 pads to, what the implementation follows, and what
+> measures at exactly **1 300.0 ms on 20 consecutive legs with zero variance**.
+> The headline was an arithmetic slip, and the bound that actually protects
+> the player — the 2 500 ms hard fail — does not move.
 
 - The fade is driven by `ui` from `lateUpdate` (integrated from `dt`, never a
   CSS transition — `02-api-contracts.md` §14).
 - `player.setControlEnabled(false)` for the whole window; input is dropped, not
   queued, so a click during the fade never fires into the new zone.
-- **Target total: ≤ 1 100 ms wall clock. Hard fail: 2 500 ms**, logged with a
+- **Target total: ≤ 1 300 ms wall clock. Hard fail: 2 500 ms**, logged with a
   per-stage breakdown to the console and to `render.stats`.
-- A loading screen was rejected because it advertises a wait. A 1.1 s black
+- A loading screen was rejected because it advertises a wait. A short black
   with a fade at each end reads as a cut, and the whole point of a town portal
   is that going home is cheap.
 
@@ -2344,8 +2353,8 @@ Ashen Wastes, 900 props, cold (first entry this session):
 | | **≈ 357 ms** | against a **600 ms** black-window budget |
 
 Bonereach is the worst case at **≈ 431 ms** (2 640 footprints, 1 200 props).
-Both leave the fade times untouched, so the *observed* transition is 1 100 ms
-regardless of the zone — the black window is padded to a constant 600 ms so
+Both leave the fade times untouched, so the *observed* transition is 1 300 ms
+regardless of the zone (O-142) — the black window is padded to a constant 600 ms so
 that the pacing is identical on a fast machine and a slow one, and the slack is
 spent, not saved.
 
@@ -2556,7 +2565,7 @@ can land before M1 completes.
 | **8** | **Spawning** | `src/world/gen/spawn.js` — §8 in full, `SpawnPoint[]`, `PackDescriptor[]`, `world.spawnPoints`, `world.packs`. | I4 passes on 600/600 layouts with the achieved density inside ±2 % (not merely ±20 %). Exactly one `unique` per layout on 600/600. Every dead-end tip holds a champion or the unique. |
 | **9** | **Bonereach** | `src/world/gen/bsp.js` (B1–B10), `src/world/build/bonereach.js`, G6–G7 prototypes. | 600 layouts: `\|rooms\| === targetRooms ∈ [12, 18]` on 100 %; `regionCount === 1` on 100 %; every corridor ≥ 3.0 m wide at its narrowest nav cross-section; I1–I4, I6, I8 pass. |
 | **10** | **Altar of Instruction** | `src/world/gen/arena.js`, `src/world/build/altar.js`, the fixed anchor tables (8 summon, 12 teleport, 6 pillar bisectors). | I5 and I7 pass on 600/600. A scripted check walks a 4.2 m/s agent from `r = 3.0` opposite the gap to the gap on all six bisectors and arrives with ≥ 1.5 s of margin every time. |
-| **11** | **Transitions, retention, town portal** | T1–T15, the retained-instance path, `openPortal` / `closePortal` / `portalAt`, T13 restore. | `tools/playtest.mjs`: town → wastes → portal to town → return → descent → altar, ten times. Ground items and chest flags survive the portal round trip; a cleared pack does not respawn; total transition wall clock ≤ 1 100 ms on every leg, black window ≤ 600 ms. |
+| **11** | **Transitions, retention, town portal** | T1–T15, the retained-instance path, `openPortal` / `closePortal` / `portalAt`, T13 restore. | `tools/playtest.mjs`: town → wastes → portal to town → return → descent → altar, ten times. Ground items and chest flags survive the portal round trip; a cleared pack does not respawn; total transition wall clock ≤ 1 300 ms on every leg (O-142), black window ≤ 600 ms. |
 | **12** | **Lighting anchors and the prewarm** | `world.lightAnchors`, `world.prewarmMaterials`, the `fx` binding path of §11.4. | `render.stats.programs` is **unchanged** across a full 90 s traverse of the Wastes with the Emberwright casting continuously — the definitive proof that the visible light count never moved. Zero shader compilations after boot, asserted by `tools/profile.mjs`. |
 
 Steps **1–4** are the critical path; nothing else in `world` can be tested
