@@ -559,6 +559,7 @@ export class WorldSystem {
     this._bonereachLayout = null;
     this._bonereachDressing = null;
     this._bonereachExit = null;
+    this._wastesExit = null;
     this._bonereachGeometryGroup = null;
 
     /** WRLD-9 — `./spawn.js`'s own `report` object for the current zone
@@ -1052,7 +1053,15 @@ export class WorldSystem {
 
     this._bonereachLayout = bonereachLayout;
     this._bonereachDressing = bonereachDressing;
-    this._bonereachExit = bonereachExit; // report/test-only — no portal-wiring ticket consumes this yet (same gap wastesEntries.exit already has)
+    this._bonereachExit = bonereachExit; // report/test-only — no portal-wiring ticket consumes this yet
+    // Same shape, for the Wastes (O-141). The exit itself was never missing —
+    // `buildInteractables` publishes it as a `kind: 'exit'` Interactable and
+    // `interactableAt` finds it, which is `02` §5's contracted surface. What
+    // was missing is this report/test handle, and without it `mapgen`'s I1
+    // could only reach the Wastes exit trigger THROUGH its coincidence with
+    // the `descent_return` entry — a coincidence that holds by construction
+    // today and would silently stop covering anything if R10 moved either.
+    this._wastesExit = isWastes ? wastesEntries.exit : null;
 
     // WRLD-4 round 2 — this zone's terrace/noise table (`./height.js`),
     // built here so it is already ready for anything a `zone:enter`

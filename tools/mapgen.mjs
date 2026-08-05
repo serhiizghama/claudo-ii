@@ -873,23 +873,29 @@ function evaluateLayout(world, nav, plan, worldSeed, runIndex) {
   // "For every entry tag and every exit trigger,
   // `nav.regionAt(entry) === nav.regionAt(exit)` and both are `>= 0`."
   //
-  // `world` exposes every entry tag through `entry(tag)`. It exposes the
-  // Bonereach exit trigger (`world._bonereachExit.trigger`), but NOT the
-  // Ashen Wastes one — `enterZone` drops `placeRidgewalkEntries(...).exit` on
-  // the floor (its own source comment even names the gap). The Wastes exit
-  // trigger centre is however IDENTICAL to the `descent_return` entry point
-  // by construction: R10 builds the trigger at `exitCentre.z + 8.0 - 2 - 1`
-  // and `descent_return` at `exitCentre.z + 8.0 - 3.0`, the same x and the
-  // same z. So the Wastes exit trigger IS covered here, through the entry tag
-  // that coincides with it — disclosed, not glossed. See this ticket's report
-  // (defect: `world` never publishes the Wastes exit).
+  // `world` exposes every entry tag through `entry(tag)`, and both real
+  // zones' exit triggers through `_bonereachExit` / `_wastesExit` (O-141).
+  //
+  // The Wastes trigger used to be reached only through its coincidence with
+  // the `descent_return` entry — R10 builds the trigger at
+  // `exitCentre.z + 8.0 - 2 - 1` and `descent_return` at
+  // `exitCentre.z + 8.0 - 3.0`, the same point. That still holds, but it is
+  // now a fact this file can CHECK rather than one it has to assume, and if
+  // R10 ever moves either the coincidence breaks loudly instead of silently
+  // uncovering the exit.
+  //
+  // `entry(tag)` returns a REUSED scratch (`Alloc: no`, 02 §5), so every
+  // read below copies x/z out immediately. Holding two of its return values
+  // at once reads one point twice — measured, and the reason this comment
+  // exists (O-141).
   const points = [];
   for (const tag of zone.entries.keys()) {
     const p = world.entry(tag);
     points.push({ kind: 'entry', tag, x: p.x, z: p.z });
   }
-  if (!isWastes && world._bonereachExit && world._bonereachExit.trigger) {
-    const t = world._bonereachExit.trigger;
+  const exitDef = isWastes ? world._wastesExit : world._bonereachExit;
+  if (exitDef && exitDef.trigger) {
+    const t = exitDef.trigger;
     points.push({ kind: 'exit', tag: 'exit-trigger', x: t.x, z: t.z, rect: t });
   }
   out.i1 = { total: points.length, bad: [], rectRescued: 0 };
