@@ -48,6 +48,7 @@ import {
   computeArriveRadius,
   DESTINATION_SNAP_RADIUS_M,
   BUDGET_RETRY_MAX_STEPS,
+  PENDING_SOLVE_TIMEOUT_STEPS,
   REPATH_FROM_CURRENT_SNAP_RADIUS_M,
 } from '../../src/player/move.js';
 import {
@@ -286,6 +287,30 @@ test('PathFollower: step 5 — a budget refusal steers straight and retries ever
   for (let i = 0; i < 20 && follower.active; i++) follower.step(FIXED_DT, nav, actors, actor);
   assert.equal(nav.calls.requestPath.length, requestsBefore, 'must stop retrying once the cap is exhausted');
   assert.ok(actors.calls.moveTo > moveToBefore, 'must keep steering after the cap — never a silent stall');
+});
+
+test('PathFollower: a request the solver never answers falls back to the SAME direct steering a budget refusal uses — never a silent stall', () => {
+  // The M5 gate ⑦ wedge: `pollPath` returns `null` both for "not solved yet"
+  // and for "the solver gave up and freed the slot", so a request that is
+  // ACCEPTED (a real id) but never resolves used to leave the actor waiting
+  // out the pending timeout, repathing, and waiting again — measured at
+  // 0.00 m travelled over a 30 s budget on the real Bonereach pipeline.
+  const nav = makeFakeNav({ resolveAfterPolls: Infinity, connectedResult: true });
+  const actors = makeFakeActors();
+  const actor = makeFakeActor(0, 0);
+  const follower = new PathFollower();
+
+  assert.equal(follower.beginOrder(nav, actor, 30, 0), true);
+  assert.equal(nav.calls.requestPath.length, 1, 'the request was accepted — this is a solver failure, not a budget refusal');
+
+  // The normal 1-3 step turnaround is still a quiet wait, exactly as before.
+  for (let i = 0; i < PENDING_SOLVE_TIMEOUT_STEPS; i++) follower.step(FIXED_DT, nav, actors, actor);
+  assert.equal(actors.calls.moveTo, 0, 'nothing may steer during the first, normal wait');
+
+  for (let i = 0; i < 60; i++) follower.step(FIXED_DT, nav, actors, actor);
+  assert.ok(actors.calls.moveTo > 0, 'once a wait has actually timed out, the actor must move');
+  assert.ok(actor.x > 1.0, `the actor must make real ground toward the destination, got x=${actor.x.toFixed(3)}`);
+  assert.ok(follower.active, 'the order is kept, not silently dropped');
 });
 
 test('PathFollower: step 10 — three consecutive blocked steps trigger exactly one repath, from a nav-snapped current position', () => {

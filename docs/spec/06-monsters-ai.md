@@ -2329,7 +2329,7 @@ not — is the whole tactical content of choosing where to fight.
 |---|---:|---|
 | A* solves per fixed step | **4** | `nav.setBudget(4)`, the `02-api-contracts.md` §6 default |
 | A* solves per second | **240** | derived |
-| Node cap per solve | **1 200** expanded nodes, then abort | this document |
+| Node cap per solve **step** | **1 200** expanded nodes, then suspend (O-144) | this document |
 | Cost per expanded node | ~55 ns (heap push/pop + 8 neighbours + cost lookup) | model |
 | Worst-case solve | `1 200 × 55 ns = 66 µs` | derived |
 | Typical solve | ~180 nodes = **9.9 µs** | model |
@@ -2343,9 +2343,29 @@ not — is the whole tactical content of choosing where to fight.
 
 A solve that hits the 1 200-node cap is **not** retried: the brain is demoted to
 the flow field for 30 steps and the abort is counted in
-`nav.stats.refusals`. A 1 200-node budget covers a 40 m path through Bonereach's
-worst corridor topology with ~6× slack over the straight-line node count; a
-solve that exceeds it is asking for something the flow field answers better.
+`nav.stats.refusals`.
+
+> **Ruling (O-144, 2026-08-05) — the cap is per solve STEP, and exhausting it
+> suspends rather than aborts.** The paragraph above claimed "a 1 200-node
+> budget covers a 40 m path through Bonereach's worst corridor topology with
+> ~6× slack". Measured on shipped layouts by replaying A*'s exact search over
+> the live grid, an entry-to-exit path needs **2 118 – 12 624** expansions in
+> Bonereach and **299 – 2 337** in the Ashen Wastes. Every one exceeds 1 200,
+> so the cap refused *every long path in the game* — that is what made gate
+> item ⑦ unwalkable, on 5/5 Bonereach layouts and 1/5 Wastes layouts.
+>
+> The cap is a **per-frame cost** bound, not a correctness bound, so it now
+> bounds work per step: a search that spends its allowance is carried to the
+> next step instead of thrown away. Per-step cost is unchanged at
+> `budget × 1 200`, so §9.5's budget and `12.P08`/`12.P09` are untouched, and
+> Bonereach's worst case resolves in 3 steps (~50 ms).
+>
+> Two bounds still refuse, and both are real: `SOLVE_NODE_LIMIT` (65 536 total
+> expansions, above the cell count of the largest shipped zone, so unreachable
+> on real content) and `PATH_NODE_CAP` (1 200 path nodes = 600 m; the longest
+> measured shipped path is 325). **A path that does not fit is refused, never
+> truncated**, and both aborts count in `nav.stats.refusals` as this section
+> requires.
 
 ### 9.2 The ring scheduler
 

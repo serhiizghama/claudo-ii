@@ -12,7 +12,10 @@
 // ===========================================================================
 //   DEFAULT_BUDGET = 4     06 §9.1 table ("A* solves per fixed step"), and
 //                          02 §6's own prose ("pathsPerStep = 4").
-//   NODE_CAP = 1200        06 §9.1 table ("Node cap per solve").
+//   NODE_CAP = 1200        06 §9.1 table ("Node cap per solve"). Spent PER
+//                          SOLVE SLOT PER STEP, not per request — see "A solve
+//                          spans steps" below.
+//   SOLVE_NODE_LIMIT       ASSIGNED — see its own comment.
 //   REQUEST_CAPACITY = 64  ASSIGNED — no spec table gives a total in-flight
 //                          request count. `pathsPerStep` bounds how many NEW
 //                          requests this file will ACCEPT in a single step
@@ -26,6 +29,46 @@
 //                          spare. Exceeding it is not a crash: `requestPath`
 //                          returns 0, the same non-blocking signal a
 //                          per-step-budget refusal gives.
+//
+// ===========================================================================
+// A solve spans steps — NODE_CAP is a per-frame budget, not a correctness
+// bound (M5 gate ⑦)
+// ===========================================================================
+// Until M5's walkability gate, `_solveOne` ran one request to completion
+// inside one fixed step and ABANDONED it (counting a refusal) the moment it
+// had expanded NODE_CAP cells. That made 06 §9.1's per-frame number decide
+// which paths EXIST, and it is why a Bonereach traversal was impossible:
+// measured on the real `boot()` -> `world.enterZone('bonereach', ...)`
+// pipeline, entry -> exit needs 2 118 - 12 624 expansions (8 layouts), and
+// the open Ashen Wastes needs up to 2 337 (5 layouts) — every one of them
+// over the cap, so every one of them refused, forever, on every retry. The
+// player travelled 0.00 m.
+//
+// The fix keeps the budget and drops the false bound: a search that reaches
+// its allowance is SUSPENDED, not abandoned, and resumes on the next step
+// where it left off. Per step the solver still expands at most
+// `budget * NODE_CAP` cells (4 x 1200 by default) — the exact ceiling it had
+// before, so 12.P08/12.P09 and the frame budget are untouched — but a long
+// path now costs several steps of latency instead of never resolving. The
+// Bonereach worst case above resolves in ceil(12624 / 4800) = 3 steps
+// (~50 ms), well inside `src/player/move.js`'s own 15-step pending timeout.
+//
+// Only ONE request may be mid-search at a time: the A* scratch (`_cellGen`/
+// `_gScore`/`_fScore`/`_cameFrom`/`_cellState`/`_heapCells`/`_heapPos`) is a
+// single shared set of grid-sized arrays, and a second search would clobber
+// a suspended one's heap and generation stamps. `_activeId` names the holder;
+// `runSolves` resumes it before dequeuing anything new, so a long search
+// delays other requests by at most the handful of steps it takes to finish
+// (they queue; `requestPath` keeps accepting, and a caller that is refused
+// gets the same non-blocking 0 it always did). The alternative — a second
+// full scratch set, ~1.4 MB at 224x224 — buys parallelism no measured case
+// needs.
+//
+// What is still a refusal: a search whose open set empties without reaching
+// the goal (impossible after the same-region pre-check, kept defensively), a
+// path longer than `PATH_NODE_CAP` nodes, and `SOLVE_NODE_LIMIT` — 06 §9.1's
+// "the abort is counted in refusals" survives intact for the cases that are
+// genuinely a give-up. Suspension is not a refusal: nothing was given up on.
 //
 // ===========================================================================
 // The id scheme — the SAME bijection ACTR-1/PHYS-2 use, for the same reason
@@ -298,7 +341,9 @@
 // `stats` — what each field means here (all five are NAV-2's to maintain)
 // ===========================================================================
 //   pending          - requests currently queued, not yet solved (Alloc: no,
-//                       read off the ring buffer's live count).
+//                       read off the ring buffer's live count), plus the one
+//                       mid-search request that is no longer in the queue but
+//                       has not resolved either.
 //   solvedThisSecond - solves that SUCCEEDED (found a real path) in the most
 //                       recently finished 60-step window, latched every 60
 //                       steps against `ctx.time.step` (never wall-clock —
@@ -308,11 +353,14 @@
 //                       case is visible instead.
 //   avgNodes         - a running lifetime mean of expanded-node count, over
 //                       the same "actually ran the search" solves above.
-//   refusals         - solves that reached the 1200-node cap (or, as a
-//                       should-never-happen defensive fallback given the
-//                       region pre-check above, emptied the open set) without
-//                       reaching the goal — 06 §9.1's literal "the abort is
-//                       counted in refusals". Fast-fail rejections
+//   refusals         - solves genuinely GIVEN UP on: `SOLVE_NODE_LIMIT`
+//                       exhausted, a path too long for `PATH_NODE_CAP`, or
+//                       (as a should-never-happen defensive fallback given
+//                       the region pre-check above) an emptied open set —
+//                       06 §9.1's literal "the abort is counted in
+//                       refusals". A search suspended at `NODE_CAP` for the
+//                       step is NOT one of these (see the header, "A solve
+//                       spans steps"). Fast-fail rejections
 //                       (off-grid/blocked/different-region/stale-version) are
 //                       NOT counted here — they never attempted a solve.
 //   fieldMs          - NAV-4's flow field. Left at the constructor's honest
@@ -322,8 +370,26 @@ import { RASTER, cellIndexAt } from './grid.js';
 
 /** 06 §9.1. */
 export const DEFAULT_BUDGET = 4;
-/** 06 §9.1. */
+/** 06 §9.1 — expansions one solve slot may spend in ONE fixed step. A search
+ * that reaches it is suspended and resumed next step, never abandoned; see
+ * this file's header, "A solve spans steps". */
 export const NODE_CAP = 1200;
+/** ASSIGNED — total expansions ONE request may spend across every step it
+ * spans. A* never reopens a closed cell, so a search can never expand more
+ * cells than the grid has; the largest shipped zone is 112x112 m = 224x224 =
+ * 50 176 cells (`src/world/data/zones.js`), and the same-region pre-check in
+ * `_beginSolve` already guarantees the goal is reachable — so on shipped
+ * content this ceiling is unreachable and no real path is ever refused for
+ * hitting it. It exists so a grid larger than anything M5 ships cannot
+ * monopolise the single A* scratch indefinitely; that abort IS a refusal
+ * (06 §9.1). At the default budget it bounds one request to
+ * 65536 / (4 * 1200) = 14 fixed steps. */
+export const SOLVE_NODE_LIMIT = 65536;
+/** Nodes one `PathHandle` can hold — sized to `NODE_CAP` as it always was
+ * (600 m of 0.5 m grid steps; the longest path measured on a shipped zone is
+ * 325 nodes). Since a search may now expand far past `NODE_CAP`, a path that
+ * would not fit is refused rather than truncated — see `_reconstructPath`. */
+export const PATH_NODE_CAP = NODE_CAP;
 /** ASSIGNED — see this file's header. */
 export const REQUEST_CAPACITY = 64;
 /** ASSIGNED — see this file's header, "Heuristic weighting". Weighted-A*
@@ -367,9 +433,7 @@ function octileHeuristic(cx0, cz0, cx1, cz1) {
 }
 
 /** One request-pool slot. Built once (`REQUEST_CAPACITY` times), reused
- * forever — `path` node storage is sized to `NODE_CAP` up front (a solved
- * path can never exceed the node cap: every path node is drawn from the set
- * of expanded/closed cells, which is itself capped at `NODE_CAP`). Alloc:
+ * forever — `path` node storage is sized to `PATH_NODE_CAP` up front. Alloc:
  * pool, exactly matching `requestPath`'s documented `Alloc: pool`.
  * @param {number} poolIndex
  * @returns {object}
@@ -387,9 +451,9 @@ function createRequestRecord(poolIndex) {
     toZ: 0,
     requestVersion: -1,
     nodeCount: 0,
-    nodesX: new Float32Array(NODE_CAP),
-    nodesY: new Float32Array(NODE_CAP),
-    nodesZ: new Float32Array(NODE_CAP),
+    nodesX: new Float32Array(PATH_NODE_CAP),
+    nodesY: new Float32Array(PATH_NODE_CAP),
+    nodesZ: new Float32Array(PATH_NODE_CAP),
   };
 }
 
@@ -490,8 +554,17 @@ export class AStarScheduler {
     this._cellState = null; // Uint8Array — meaningful only if cellGen[i] === currentGen
     this._heapCells = null; // Int32Array — binary min-heap, cell indices
     this._heapPos = null; // Int32Array — cellIndex -> heap position (open cells only, this gen)
-    this._scratchCellPath = new Int32Array(NODE_CAP); // reused per solve, backward-walk buffer
+    this._scratchCellPath = new Int32Array(PATH_NODE_CAP); // reused per solve, backward-walk buffer
     this._currentGen = 0; // plain number, monotonic, never reset — see file header
+
+    // The suspended search that currently owns the scratch above, if any —
+    // see the file header, "A solve spans steps". `_activeId` 0 means free.
+    this._activeId = 0;
+    this._activeGen = 0;
+    this._activeHeapSize = 0;
+    this._activeExpanded = 0;
+    this._activeStartIdx = -1;
+    this._activeGoalIdx = -1;
 
     // stats bookkeeping — see file header for exactly what each counts.
     this._solvesThisWindow = 0;
@@ -519,6 +592,13 @@ export class AStarScheduler {
   /** @param {number} width @param {number} height */
   _ensureScratch(width, height) {
     if (this._scratchWidth === width && this._scratchHeight === height) return;
+    // Rebuilding the arrays destroys any suspended search in them. A resize
+    // implies a rebuild, so `runSolves` has already dropped it on the version
+    // check — defensive only, and it must free the slot rather than leak it.
+    if (this._activeId !== 0) {
+      this._pool.freeSlot((this._activeId - 1) % this._pool.capacity);
+      this._activeId = 0;
+    }
     const n = width * height;
     this._cellGen = new Float64Array(n);
     this._gScore = new Float32Array(n);
@@ -664,39 +744,51 @@ export class AStarScheduler {
     rec.id = id;
     this._pool.enqueuePending(id);
     this._acceptedThisStep++;
-    this._stats.pending = this._pool.pendingCount;
+    this._stats.pending = this._pendingTotal();
     return id;
   }
 
   /**
-   * Drains up to `_budget` pending requests against the CURRENT `grid`,
-   * called once per fixed step from `NavSystem.fixedUpdate`.
+   * Spends up to `_budget` solve slots of at most `NODE_CAP` expansions each
+   * against the CURRENT `grid`, called once per fixed step from
+   * `NavSystem.fixedUpdate`. A slot resumes the suspended search first, if
+   * there is one — see the file header, "A solve spans steps".
    * @param {object} grid @param {number} version @param {number} stepIndex
    */
   runSolves(grid, version, stepIndex) {
+    this._dropActiveIfStale(version);
     this._ensureScratch(grid.width, grid.height);
 
     let solvesUsed = 0;
     while (solvesUsed < this._budget) {
-      const id = this._pool.dequeuePending();
-      if (id === 0) break;
+      let rec = this._activeRecord();
 
-      const slot = (id - 1) % this._pool.capacity;
-      const rec = this._pool.records[slot];
-      if (rec.state !== STATE_PENDING || rec.id !== id) continue; // stale queue entry — cancelled meanwhile
+      if (rec === null) {
+        const id = this._pool.dequeuePending();
+        if (id === 0) break;
 
-      if (rec.requestVersion !== version) {
-        // A rebuild happened while this request was queued — see file
-        // header. Dropped silently: never attempted, not a refusal.
-        this._pool.freeSlot(slot);
-        continue;
+        const slot = (id - 1) % this._pool.capacity;
+        const candidate = this._pool.records[slot];
+        if (candidate.state !== STATE_PENDING || candidate.id !== id) continue; // stale queue entry — cancelled meanwhile
+
+        if (candidate.requestVersion !== version) {
+          // A rebuild happened while this request was queued — see file
+          // header. Dropped silently: never attempted, not a refusal.
+          this._pool.freeSlot(slot);
+          continue;
+        }
+
+        solvesUsed++;
+        if (!this._beginSolve(grid, candidate)) continue; // fast-failed, slot already freed
+        rec = candidate;
+      } else {
+        solvesUsed++;
       }
 
-      this._solveOne(grid, rec);
-      solvesUsed++;
+      this._advanceSolve(grid, rec, NODE_CAP);
     }
 
-    this._stats.pending = this._pool.pendingCount;
+    this._stats.pending = this._pendingTotal();
 
     if (stepIndex % STATS_WINDOW_STEPS === 0) {
       this._stats.solvedThisSecond = this._solvesThisWindow;
@@ -704,10 +796,44 @@ export class AStarScheduler {
     }
   }
 
-  /** @param {object} grid @param {object} rec a PENDING record, version-checked already. */
-  _solveOne(grid, rec) {
+  /** Queued requests plus the one mid-search request, which the queue no
+   * longer holds — `stats.pending`'s own contract. @returns {number} */
+  _pendingTotal() {
+    return this._pool.pendingCount + (this._activeId !== 0 ? 1 : 0);
+  }
+
+  /** The record of the suspended search, or `null` if there is none.
+   * @returns {object|null} */
+  _activeRecord() {
+    if (this._activeId === 0) return null;
+    return this._pool.records[(this._activeId - 1) % this._pool.capacity];
+  }
+
+  /** Releases the scratch if the suspended search was cancelled underneath
+   * us, or was requested against a grid version that no longer exists (the
+   * same version-stale drop a queued request gets, and equally not a
+   * refusal). @param {number} version */
+  _dropActiveIfStale(version) {
+    if (this._activeId === 0) return;
+    const slot = (this._activeId - 1) % this._pool.capacity;
+    const rec = this._pool.records[slot];
+    if (rec.id !== this._activeId || rec.state !== STATE_PENDING) {
+      this._activeId = 0;
+      return;
+    }
+    if (rec.requestVersion !== version) {
+      this._pool.freeSlot(slot);
+      this._activeId = 0;
+    }
+  }
+
+  /**
+   * Fast-fails or seeds the A* scratch for `rec` and takes ownership of it.
+   * @param {object} grid @param {object} rec a PENDING record, version-checked already.
+   * @returns {boolean} `false` if the request fast-failed (slot already freed).
+   */
+  _beginSolve(grid, rec) {
     const width = grid.width;
-    const height = grid.height;
     const cost = grid.cost;
     const region = grid.region;
 
@@ -716,41 +842,69 @@ export class AStarScheduler {
 
     if (startIdx < 0 || goalIdx < 0 || cost[startIdx] >= RASTER.COST_BLOCKED || cost[goalIdx] >= RASTER.COST_BLOCKED) {
       this._pool.freeSlot(rec.poolIndex);
-      return;
+      return false;
     }
     const startRegion = region[startIdx];
     if (startRegion < 0 || startRegion !== region[goalIdx]) {
       // Unreachable goal — O(1) fast-fail, never expands a node. File header.
       this._pool.freeSlot(rec.poolIndex);
-      return;
+      return false;
     }
 
     this._currentGen++;
     const gen = this._currentGen;
+
+    this._cellGen[startIdx] = gen;
+    this._gScore[startIdx] = 0;
+    this._cameFrom[startIdx] = -1;
+    this._cellState[startIdx] = 1; // OPEN
+    // HEURISTIC_WEIGHT-inflated priority key — see file header, "Heuristic
+    // weighting". gScore (0 here) stays exact/unweighted.
+    this._fScore[startIdx] = HEURISTIC_WEIGHT
+      * octileHeuristic(startIdx % width, (startIdx / width) | 0, goalIdx % width, (goalIdx / width) | 0);
+
+    this._activeId = rec.id;
+    this._activeGen = gen;
+    this._activeHeapSize = this._heapPush(0, startIdx);
+    this._activeExpanded = 0;
+    this._activeStartIdx = startIdx;
+    this._activeGoalIdx = goalIdx;
+    return true;
+  }
+
+  /**
+   * Runs at most `allowance` expansions of the search `_beginSolve` seeded.
+   * Resolves the request (SOLVED, or refused), or leaves it suspended for the
+   * next step — see the file header, "A solve spans steps".
+   * @param {object} grid @param {object} rec @param {number} allowance
+   */
+  _advanceSolve(grid, rec, allowance) {
+    const width = grid.width;
+    const height = grid.height;
+    const cost = grid.cost;
+
+    const gen = this._activeGen;
     const cellGen = this._cellGen;
     const gScore = this._gScore;
     const fScore = this._fScore;
     const cameFrom = this._cameFrom;
     const cellState = this._cellState;
 
+    const startIdx = this._activeStartIdx;
+    const goalIdx = this._activeGoalIdx;
     const goalCx = goalIdx % width;
     const goalCz = (goalIdx / width) | 0;
-    const startCx = startIdx % width;
-    const startCz = (startIdx / width) | 0;
 
-    cellGen[startIdx] = gen;
-    gScore[startIdx] = 0;
-    cameFrom[startIdx] = -1;
-    cellState[startIdx] = 1; // OPEN
-    // HEURISTIC_WEIGHT-inflated priority key — see file header, "Heuristic
-    // weighting". gScore (0 here) stays exact/unweighted.
-    fScore[startIdx] = HEURISTIC_WEIGHT * octileHeuristic(startCx, startCz, goalCx, goalCz);
+    // Whichever runs out first: this step's slot allowance, or what is left
+    // of the request's lifetime ceiling.
+    const budgetLeft = SOLVE_NODE_LIMIT - this._activeExpanded;
+    const limit = allowance < budgetLeft ? allowance : budgetLeft;
 
-    let heapSize = this._heapPush(0, startIdx);
+    let heapSize = this._activeHeapSize;
     let expanded = 0;
     let foundGoal = false;
 
-    while (heapSize > 0 && expanded < NODE_CAP) {
+    while (heapSize > 0 && expanded < limit) {
       const current = this._heapPop(heapSize);
       heapSize--;
       cellState[current] = 2; // CLOSED
@@ -803,33 +957,57 @@ export class AStarScheduler {
       }
     }
 
+    this._activeHeapSize = heapSize;
+    this._activeExpanded += expanded;
+
     if (!foundGoal) {
-      this._stats.refusals++;
-      this._totalNodesForAvg += expanded;
-      this._totalSolvesForAvg++;
-      this._stats.avgNodes = this._totalNodesForAvg / this._totalSolvesForAvg;
-      this._pool.freeSlot(rec.poolIndex);
+      // Out of THIS step's allowance but still searching: suspend, keep the
+      // scratch, resume next step. Not a refusal — see the file header.
+      if (heapSize > 0 && this._activeExpanded < SOLVE_NODE_LIMIT) return;
+      this._finishSolve(rec, false);
       return;
     }
 
-    this._reconstructPath(grid, rec, cameFrom, startIdx, goalIdx, width);
-    this._totalNodesForAvg += expanded;
+    if (!this._reconstructPath(grid, rec, cameFrom, startIdx, goalIdx, width)) {
+      this._finishSolve(rec, false); // path longer than PATH_NODE_CAP — see there
+      return;
+    }
+    this._finishSolve(rec, true);
+  }
+
+  /** Retires the active search: books its total expansion count into
+   * `avgNodes`, releases the scratch, and either publishes the path or counts
+   * the refusal 06 §9.1 asks for.
+   * @param {object} rec @param {boolean} solved */
+  _finishSolve(rec, solved) {
+    this._totalNodesForAvg += this._activeExpanded;
     this._totalSolvesForAvg++;
     this._stats.avgNodes = this._totalNodesForAvg / this._totalSolvesForAvg;
-    this._solvesThisWindow++;
-    rec.state = STATE_SOLVED;
+    this._activeId = 0;
+
+    if (solved) {
+      this._solvesThisWindow++;
+      rec.state = STATE_SOLVED;
+      return;
+    }
+    this._stats.refusals++;
+    this._pool.freeSlot(rec.poolIndex);
   }
 
   /** Walks `cameFrom` backward from `goalIdx` to `startIdx` into the shared
    * scratch buffer, then writes it forward (start -> goal) as world-space
    * `Vec3`s into `rec`'s own storage — baked in now so `pathNode` never
    * needs the grid again afterward (safe to read even past a later
-   * `rebuild()`, per this file's header). */
+   * `rebuild()`, per this file's header).
+   * @returns {boolean} `false` if the path needs more than `PATH_NODE_CAP`
+   *   nodes to write — a search may now expand past that (see the header),
+   *   and a truncated path is worse than none. `rec` is left untouched. */
   _reconstructPath(grid, rec, cameFrom, startIdx, goalIdx, width) {
     const scratch = this._scratchCellPath;
     let idx = goalIdx;
     let count = 0;
     for (;;) {
+      if (count >= PATH_NODE_CAP) return false;
       scratch[count++] = idx;
       if (idx === startIdx) break;
       idx = cameFrom[idx];
@@ -852,6 +1030,7 @@ export class AStarScheduler {
       nodesY[k] = groundY[cellIdx];
     }
     rec.nodeCount = count;
+    return true;
   }
 
   /** `02-api-contracts.md` §6: `pollPath(requestId) => PathHandle | null`. */
@@ -871,8 +1050,9 @@ export class AStarScheduler {
     const slot = (requestId - 1) % this._pool.capacity;
     const rec = this._pool.records[slot];
     if (rec.id !== requestId || rec.state === STATE_FREE) return;
+    if (this._activeId === requestId) this._activeId = 0; // frees the A* scratch for the next search
     this._pool.freeSlot(slot);
-    this._stats.pending = this._pool.pendingCount;
+    this._stats.pending = this._pendingTotal();
   }
 
   /** `02-api-contracts.md` §6: `releasePath(path) => void`. Safe no-op on a

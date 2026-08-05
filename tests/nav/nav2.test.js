@@ -259,6 +259,7 @@ test('12.P09: worst-case single A* solve time on a hostile, Ashen-Wastes-scale m
     tick(nav, ctx, 1);
   }
 
+  const refusalsBefore = nav.stats.refusals;
   const iterations = 30;
   let worstMs = 0;
   for (let i = 0; i < iterations; i++) {
@@ -272,15 +273,67 @@ test('12.P09: worst-case single A* solve time on a hostile, Ashen-Wastes-scale m
   }
 
   // eslint-disable-next-line no-console
-  console.log(`[NAV-2] 12.P09 worst-case single A* solve over ${iterations} solves on a 192x191, 96-lane, cost-varied maze: ${worstMs.toFixed(4)} ms`);
+  console.log(`[NAV-2] 12.P09 worst-case single A* solve over ${iterations} steps on a 192x191, 96-lane, cost-varied maze: ${worstMs.toFixed(4)} ms`);
 
-  // This maze's true corridor length (~96*192 ≈ 18,432 cells) vastly exceeds
-  // NODE_CAP (1200), so every one of these solves is the node-cap ABORT case
-  // — the single most expensive outcome this solver has (the full 1200-node
-  // expansion loop runs to completion before giving up), which is exactly
-  // what "worst case" should mean for this gate.
-  assert.ok(nav.stats.refusals >= iterations, 'every solve on this maze should hit the 1200-node cap, not find a shortcut');
+  // RE-POINTED for M5 gate ⑦ (`src/nav/astar.js`'s header, "A solve spans
+  // steps"): this maze's corridor (~96*192 ≈ 18,432 cells) still vastly
+  // exceeds NODE_CAP, so every step above still runs the full 1200-node
+  // expansion loop — the timing measurement means exactly what it always
+  // did, the most expensive step this solver can have. What changed is the
+  // OUTCOME: that step now suspends the search and carries it into the next
+  // one instead of throwing it away, so `refusals` must stay FLAT here.
+  // This assertion used to be `refusals >= iterations`, i.e. it pinned the
+  // very abort that made Bonereach unwalkable. The work being real, and
+  // ~NODE_CAP-sized per step, is asserted directly by the carry-across test
+  // below (which counts the steps a search of this size actually needs).
+  //
+  // A refusal can still appear here, but only from a search that RAN TO
+  // COMPLETION and then could not fit its ~18,432-node corridor into
+  // PATH_NODE_CAP — never from a step that ran out of allowance. Bound it by
+  // how many searches could possibly have completed: 40 steps (10 warm-up +
+  // 30) x NODE_CAP expansions, against a deliberately conservative 10,000
+  // expansions per search (the real corridor is nearly twice that). Under
+  // the old abort-at-the-cap behaviour this number was >= 30 — one per step.
+  const maxCompletable = Math.floor(((10 + iterations) * NODE_CAP) / 10000);
+  assert.ok(
+    nav.stats.refusals - refusalsBefore <= maxCompletable,
+    `a step that runs out of allowance must suspend, not abandon: ${nav.stats.refusals - refusalsBefore} refusals, at most ${maxCompletable} searches could even have finished`,
+  );
+  assert.ok(nav.stats.pending >= 1, 'the unfinished searches must still be in flight, not silently dropped');
   assert.ok(worstMs <= 1.0, `12.P09: worst-case solve was ${worstMs.toFixed(4)} ms, gate is <= 1.0 ms`);
+});
+
+test('a search too big for one step is carried across steps at ~NODE_CAP expansions a step, and its progress is never thrown away', async () => {
+  // Same hostile maze, one request, budget 1 (one NODE_CAP allowance per
+  // step). ~18,432 corridor cells at 1200 expansions a step cannot resolve
+  // in fewer than ~15 steps; anything much faster would mean the per-step
+  // loop is bailing early rather than doing real work, which is what the
+  // timing gate above would otherwise be free to satisfy the wrong way.
+  const { grid, start, goal } = buildSnakeMazeGrid({ width: 192, lanes: 96 });
+  const { nav, ctx } = await makeNav();
+  nav._grid = grid;
+  nav._version = 1;
+  nav.setBudget(1);
+
+  const refusalsBefore = nav.stats.refusals;
+  const id = nav.requestPath(start.x, start.z, goal.x, goal.z, 1);
+  assert.ok(id > 0);
+
+  let steps = 0;
+  while (steps < 400 && nav.stats.refusals === refusalsBefore && nav.pollPath(id) === null) {
+    tick(nav, ctx, 1);
+    steps++;
+    if (nav.stats.refusals === refusalsBefore && nav.pollPath(id) === null) {
+      assert.equal(nav.stats.pending, 1, `step ${steps}: the request must stay in flight while it is being solved`);
+    }
+  }
+
+  assert.ok(steps >= 10, `an 18,432-cell corridor must take many NODE_CAP-sized steps to search, took ${steps}`);
+  // It ends in a refusal, but for the OTHER documented reason: the corridor
+  // itself is ~18,432 nodes long, far past PATH_NODE_CAP, and a path that
+  // does not fit is refused rather than silently truncated.
+  assert.equal(nav.stats.refusals, refusalsBefore + 1, 'a path too long for PATH_NODE_CAP is refused, and the refusal is counted');
+  assert.equal(nav.pollPath(id), null, 'a refused request must never resolve to a path');
 });
 
 // ---------------------------------------------------------------------------
@@ -558,22 +611,77 @@ test('MAIN: a goal in a different region fails fast without expanding nodes, and
 });
 
 // ---------------------------------------------------------------------------
-// Correctness — the node cap aborts and IS counted in stats.refusals
+// Correctness — a search past NODE_CAP resumes; only a real give-up is a
+// refusal (`src/nav/astar.js`'s header, "A solve spans steps")
 // ---------------------------------------------------------------------------
 
-test('MAIN: a solve that would need far more than 1200 expanded nodes aborts and increments stats.refusals, without ever blocking', async () => {
-  const { grid, start, goal } = buildSnakeMazeGrid({ width: 60, lanes: 25 }); // ~1500-cell corridor > NODE_CAP
+/**
+ * A concave trap: an open field with a large closed box around the start,
+ * its only gap at the far (bottom) end, and the goal just OUTSIDE the box on
+ * the near (top) side. A* must close most of the box's interior before it
+ * finds the gap — thousands of expansions — but the path it finally returns
+ * is short (down the box, out, and back around). That combination is what no
+ * snake maze can give: over NODE_CAP to SEARCH, well under PATH_NODE_CAP to
+ * RETURN, so it isolates "carried across steps" from "path too long".
+ * @returns {{grid:object, start:{x:number,z:number}, goal:{x:number,z:number}}}
+ */
+function buildConcaveTrapGrid({ size = 120, cellSize = 0.5 } = {}) {
+  const grid = createNavGrid({ cellSize, width: size, height: size, originX: 0, originZ: 0 });
+  const scratch = createRasterScratch(size, size);
+  grid.flags.fill(NAV_FLAG.walkable);
+  grid.cost.fill(1);
+
+  const lo = 20;
+  const hi = size - 21;
+  const gapCol = hi - 1;
+  for (let c = lo; c <= hi; c++) {
+    for (const i of [lo * size + c, hi * size + c, c * size + lo, c * size + hi]) {
+      grid.flags[i] = 0;
+      grid.cost[i] = RASTER.COST_BLOCKED;
+    }
+  }
+  grid.flags[hi * size + gapCol] = NAV_FLAG.walkable; // the one way out, at the far end
+  grid.cost[hi * size + gapCol] = 1;
+
+  passN7Regions(grid, scratch);
+  grid.version = 1;
+  return { grid, start: cellCentre(grid, (lo + hi) >> 1, lo + 2), goal: cellCentre(grid, (lo + hi) >> 1, lo - 6) };
+}
+
+test('MAIN: a search that needs far more than 1200 expansions is suspended and resumed, never abandoned — and it returns a real path', async () => {
+  // This test used to assert the opposite ("a solve that would need far more
+  // than 1200 expanded nodes aborts and increments stats.refusals"). That
+  // abort is precisely what made a Bonereach traversal impossible for M5
+  // gate ⑦ — entry -> exit there measures 2,118-12,624 expansions on the
+  // real pipeline — so the behaviour changed and this test is re-pointed at
+  // the corrected one. `SOLVE_NODE_LIMIT`/`PATH_NODE_CAP` refusals still get
+  // their own coverage (the carry-across test above).
+  const { grid, start, goal } = buildConcaveTrapGrid();
   const { nav, ctx } = await makeNav();
   nav._grid = grid;
   nav._version = 1;
+  nav.setBudget(1); // one NODE_CAP allowance per step
 
   const refusalsBefore = nav.stats.refusals;
   const id = nav.requestPath(start.x, start.z, goal.x, goal.z, 1);
   assert.ok(id > 0);
-  tick(nav, ctx, 1);
 
-  assert.equal(nav.pollPath(id), null, 'a solve that hits the node cap must never resolve to a path');
-  assert.equal(nav.stats.refusals, refusalsBefore + 1, 'the abort must be counted in stats.refusals');
+  tick(nav, ctx, 1);
+  assert.equal(nav.pollPath(id), null, 'one NODE_CAP allowance cannot finish this search');
+  assert.equal(nav.stats.refusals, refusalsBefore, 'running out of a STEP allowance is not a refusal');
+
+  let steps = 1;
+  while (steps < 200 && nav.pollPath(id) === null) {
+    tick(nav, ctx, 1);
+    steps++;
+  }
+
+  const path = nav.pollPath(id);
+  assert.ok(path, `the search must finish and return a path, took ${steps} steps`);
+  assert.ok(steps > 1, 'test setup: this search must genuinely span more than one step');
+  assert.ok(nav.pathLength(path) >= 2, 'a real path, not an empty one');
+  assert.equal(nav.stats.refusals, refusalsBefore, 'no refusal anywhere along a search that succeeded');
+  assert.equal(nav.stats.pending, 0, 'nothing left in flight once it resolved');
 });
 
 // ---------------------------------------------------------------------------

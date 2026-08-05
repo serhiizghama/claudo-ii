@@ -395,9 +395,14 @@ test('MB12 sanity: a genuine node-cap abort increments nav.stats.refusals and is
     if (path) { solved++; nav.releasePath(path); }
   }
 
-  assert.equal(refusalsSeen, ITER, 'every solve on this maze must hit the 1200-node cap, per tests/nav/nav2.test.js\'s own established measurement of this exact shape');
+  // O-144: NODE_CAP is spent per STEP now, not per request — a search that
+  // exhausts it suspends and resumes rather than aborting. This 1500-cell
+  // corridor spans two steps, so a refusal lands on every other one. What
+  // this test is actually for is untouched: nothing resolves, and the ratio
+  // is a real 1 rather than 0/0.
+  assert.equal(refusalsSeen, ITER / 2, 'this maze still refuses — it overruns PATH_NODE_CAP — but across two steps per search, not one');
   assert.equal(solved, 0, 'a node-cap-aborted request must never resolve to a SOLVED handle');
-  assert.equal(nav.stats.refusals, refusalsBefore + ITER);
+  assert.equal(nav.stats.refusals, refusalsBefore + ITER / 2);
 
   const ratio = nav.stats.refusals / (nav.stats.refusals + solved);
   assert.equal(ratio, 1, 'a run that is ALL node-cap aborts must compute a ratio of 1 — proves this metric can actually fail, not just pass by construction');

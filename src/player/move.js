@@ -77,7 +77,9 @@
 //                      nav.version===0 fallback above, and permanently once
 //                      a budget-refused order exhausts its 12 retries (step
 //                      5's "after 12 refusals, keep steering").
-//   MODE_PENDING      a `requestPath` id is outstanding; polling every step.
+//   MODE_PENDING      a `requestPath` id is outstanding; polling every step,
+//                      and steering straight once a wait has timed out (see
+//                      "A solve that never resolves" below).
 //   MODE_FOLLOWING    a solved, smoothed `PathHandle` is held; steering node
 //                      by node.
 //   MODE_BUDGET_RETRY requestPath returned 0 (the 4/step budget was full);
@@ -88,6 +90,26 @@
 // decides whether to transition (pending -> following, budget-retry ->
 // pending, any mode's blocked-streak -> a fresh request, following's stale
 // version -> a fresh request, either terminal mode's arrival -> idle).
+//
+// ---------------------------------------------------------------------------
+// A solve that never resolves — the second wedge, found by the M5 gate
+// ---------------------------------------------------------------------------
+// A budget refusal (`requestPath` -> 0) has always kept the player moving:
+// `MODE_BUDGET_RETRY` steers straight at the destination every step while it
+// retries. A SOLVER FAILURE had no such fallback. `pollPath` cannot tell
+// "not solved yet" from "the solver gave up and freed the slot" — both are
+// `null` — so a request the solver abandoned left this file waiting out
+// `PENDING_SOLVE_TIMEOUT_STEPS`, repathing, waiting again, forever, with the
+// actor motionless. Measured on the real `boot()` pipeline before this fix:
+// 0.00 m travelled over a 30 s budget on every Bonereach layout tried, while
+// `nav.stats.refusals` climbed at ~3.6/s. `src/nav/astar.js` no longer
+// abandons long searches, which is what actually made Bonereach walkable —
+// but "the solver never answers" must not be a stall regardless of why, so
+// the first timeout latches `_solveFailed` and every pending step after it
+// steers with `_steerDirectStep`, the SAME straight-line fallback (arrival
+// check, `moveOneStep`, blocked tracking) `MODE_BUDGET_RETRY` uses. The
+// normal 1-3 step turnaround is untouched: nothing steers until a wait has
+// actually timed out once.
 //
 // ---------------------------------------------------------------------------
 // Blocked-streak repathing — the primary anti-wedge mechanism (step 10)
@@ -260,6 +282,7 @@ export class PathFollower {
     this._blockedStreak = 0;
     this._budgetRefusalStreak = 0;
     this._pendingWaitSteps = 0;
+    this._solveFailed = false;
 
     // Zero-allocation scratch (rule 5/6) — built once, reused by every call.
     this._destSnapScratch = { x: 0, y: 0, z: 0 };
@@ -291,6 +314,7 @@ export class PathFollower {
     this._blockedStreak = 0;
     this._budgetRefusalStreak = 0;
     this._pendingWaitSteps = 0;
+    this._solveFailed = false;
 
     // See the file header, "The nav.version === 0 gate".
     if (!nav || nav.version === 0) {
@@ -364,7 +388,7 @@ export class PathFollower {
 
     switch (this._mode) {
       case MODE_PENDING:
-        this._stepPending(nav, actor);
+        this._stepPending(h, nav, actors, actor);
         return;
       case MODE_BUDGET_RETRY:
         this._stepBudgetRetry(h, nav, actors, actor);
@@ -414,12 +438,15 @@ export class PathFollower {
   /** Step 6: poll. Resolves into `MODE_FOLLOWING` (smoothing once, per step
    * 7) or waits, with `PENDING_SOLVE_TIMEOUT_STEPS`'s own safety net against
    * a request the solver silently dropped (see that constant's comment).
-   * Deliberately does not steer while pending — the normal 1-3 step wait is
+   * Does not steer during the FIRST wait — the normal 1-3 step turnaround is
    * imperceptible at 60 Hz and steering blind into an unresolved path risks
-   * exactly the false blocked-streak this file otherwise avoids.
+   * exactly the false blocked-streak this file otherwise avoids. Once a wait
+   * has actually timed out, `_solveFailed` latches and every later pending
+   * step steers straight at the destination, the same fallback a budget
+   * refusal uses — see the file header, "A solve that never resolves".
    * @private
    */
-  _stepPending(nav, actor) {
+  _stepPending(h, nav, actors, actor) {
     const path = nav.pollPath(this._requestId);
     if (path) {
       this._requestId = 0;
@@ -427,6 +454,7 @@ export class PathFollower {
       this._pathIndex = 0;
       this._pathVersionAtSolve = nav.version;
       this._blockedStreak = 0;
+      this._solveFailed = false;
       nav.smooth(path); // step 7
       this._mode = MODE_FOLLOWING;
       return;
@@ -435,13 +463,18 @@ export class PathFollower {
     this._pendingWaitSteps++;
     if (this._pendingWaitSteps > PENDING_SOLVE_TIMEOUT_STEPS) {
       this._pendingWaitSteps = 0;
+      this._solveFailed = true;
       // Shares `_repathFromCurrent`'s own snap-then-connect logic (see that
       // method's own comment) rather than repeating a naive
       // `nav.connected(actor.x, actor.z, ...)` here — the actor's raw
       // position is exactly as likely to round into a blocked nav cell in
       // this branch as in the blocked-streak one.
       this._repathFromCurrent(nav, actor);
+      if (!this._active) return; // repath found the order no longer reachable
+    } else if (!this._solveFailed) {
+      return;
     }
+    this._steerDirectStep(h, nav, actors, actor);
   }
 
   /** Step 5's retry loop: try the request again every step, up to
