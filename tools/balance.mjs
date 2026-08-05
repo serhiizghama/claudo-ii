@@ -2367,12 +2367,13 @@ function checkMB7(B, checks) {
   const triples = legalUniqueTriples('bone_ranker').length;
   const modelled = offenders.filter((o) => o.triple.includes('vampiric')).length;
   checks.push({
-    id: 'MB7.unique', severity: 'fail', scope: 'bone_ranker mlvl10 unique, three affixes, Instruction', pass: offenders.length === 0,
+    id: 'MB7.unique', severity: 'note', scope: 'bone_ranker mlvl10 unique, three affixes, Instruction', pass: true,
     lines: [
-      `${offenders.length} of ${triples * 3} legal (triple x build) combinations exceed the 2.5x ceiling; worst = [${worstUnique.triple.join(', ')}] vs ${worstUnique.build} at ${worstUnique.ttk.toFixed(2)}s / ${bareUniq[worstUnique.build].toFixed(2)}s bare = ${worstUnique.mult.toFixed(2)}x`,
+      `WITHDRAWN as an assertion by O-146 (owner ruling) and kept as a measurement: the 2.5x ceiling compared a unique against its BARE TTK, a state §6.5's mandatory immunity draw means no unique can occupy. Nothing gates unique tankiness now — these numbers are the only thing watching it`,
+      `${offenders.length} of ${triples * 3} legal (triple x build) combinations exceed the withdrawn 2.5x ceiling; worst = [${worstUnique.triple.join(', ')}] vs ${worstUnique.build} at ${worstUnique.ttk.toFixed(2)}s / ${bareUniq[worstUnique.build].toFixed(2)}s bare = ${worstUnique.mult.toFixed(2)}x`,
       `headline case carries NO modelled step — \`burning\` alone on a unique vs the Emberwright: fireResist set to immunityValue ${TIER[tier].immunityValue} (+${TIER[tier].monsterResist} tier) -> capped 75 -> ${MB_REF_BUILDS.emberwright.fire} x 0.25 = ${(MB_REF_BUILDS.emberwright.fire * 0.25).toFixed(3)} per cast -> ${(MB_REF_BUILDS.emberwright.fire * 0.25 / MB_REF_BUILDS.emberwright.interval).toFixed(2)} dps -> ${uniq.life} / that = ${burningEmberTtk.toFixed(2)}s against ${bareUniq.emberwright.toFixed(2)}s bare = ${burningEmberMult.toFixed(2)}x. Same arithmetic §6.6 uses for its own 3.20x champion cell; only the baseline differs (a unique's own +30 elemental resist makes its BARE fire TTK longer, so the immunity's ratio is 0.70/0.25 = 2.80 by construction)`,
       `${modelled} of the ${offenders.length} involve \`vampiric\`, whose unique-rank leech is the one MODELLED step in this check (champion leech x 2.2/1.6, see VAMPIRIC_LEECH_CHAMPION's own comment) — they are counted but are NOT what this verdict rests on`,
-      'NOT adjusted to pass: §6.6 states the 2.5x unique ceiling and prints only the champion table; the ceiling is left exactly as written and the measurement reported. Owner ruling needed — see this ticket\'s report',
+      'The ceiling was never adjusted to pass and is not adjusted now — it is withdrawn outright, which is a check removed rather than a threshold loosened. §6.6 prints a table for champions only, and the champion arm above still asserts 3.5x',
     ],
   });
 }

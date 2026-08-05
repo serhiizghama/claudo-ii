@@ -1563,6 +1563,30 @@ defensive, and each in a different way:
   3.20× against the mono-element Emberwright and 1.00× against both weapon
   classes, it is the binding constraint on MB7 and the reason §6.4 gates
   immunity by tier.
+
+> **Ruling (O-146, 2026-08-05) — MB7's unique arm is withdrawn; the champion
+> arm stands.** The 2.5× unique ceiling measured a unique's affixed TTK against
+> its **bare** TTK, and a unique is never bare: §6.5 draws one affix from every
+> group and the `immunity` group is mandatory, with no §6.5 exclusion keeping
+> `burning` off a unique. So the baseline is a state no unique in the game can
+> occupy.
+>
+> The consequence is arithmetic, from three documents' printed numbers and no
+> model at all: a unique's own **+30 elemental resist** (`03` §9.3) makes its
+> bare fire TTK longer (0.70 multiplier), `immunityValue` 85 clamped at `01`
+> §3.4's 75 % cap gives 0.25, and **0.70 / 0.25 = 2.80× before the second and
+> third affixes are drawn**. Measured across all legal triples, 12 of 63
+> combinations exceed 2.5×, worst `[burning, swift, vampiric]` vs Emberwright
+> at 5.34×.
+>
+> Owner ruling: option (a) of O-123 — the ceiling applies to champions, which
+> is also the only rank §6.6 prints a table for. **This removes a check rather
+> than fixing one, and that is stated rather than dressed up**: unique
+> tankiness is no longer gated by any assertion. The measured 2.80× floor and
+> the 5.34× worst case stay printed by `tools/balance.mjs` as a NOTE so the
+> number that motivated the ruling cannot quietly drift. Revisiting belongs
+> with `*ResistPierce`, which no reference build carries at any tier (see the
+> MB8 note for the same missing input).
 - **`charged`** costs the Runeblade 1.41× because half its damage is the
   `blade_seal` lightning imbue: `18.45 × 0.25 = 4.61` instead of `14.76` per
   landed hit. It costs the other two nothing.
@@ -2814,7 +2838,7 @@ no DOM, which is what makes this possible (`ARCHITECTURE.md` hard rule 9).
 | **MB5** | Molgrim TTK, clvl 13 vs `mlvl 15`, all three builds, with the schedule-derived `U` and the phase III blind | **60.0 – 90.0 s** |
 | **MB5b** | Molgrim combat time never reaches the 150 s enrage arm for any reference build at any tier | < 150 s |
 | **MB6** | Class TTK spread against every target, every rank, every tier | < 2.0× the median |
-| **MB7** | No single affix raises a champion's TTK above 3.5× its bare value; no legal three-affix unique combination raises a unique's TTK above 2.5× | see §6.6 |
+| **MB7** | No single affix raises a **champion's** TTK above 3.5× its bare value. The unique arm is withdrawn — see the ruling below | champion 3.5× |
 | **MB8** | No legal affix combination produces an infinite TTK for any reference build at any tier | TTK finite |
 | **MB9** | Stand-still survival time of every pack template against the reference build at the zone `mlvl` | ≥ 3.0 s |
 | **MB10** | `ai.rollAffixes` over 100 000 draws matches §6.1's weights; never two affixes from one group on a unique; never an excluded pair; never an ineligible affix for the archetype | ±1.5 % on weights, 0 violations |

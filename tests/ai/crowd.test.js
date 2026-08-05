@@ -118,6 +118,10 @@ import { Rng } from '../../src/core/rng.js';
 import { SEEDS } from '../helpers/seed.js';
 
 const FIXED_DT = 1 / 60;
+/** O-147: the minimum members in the corridor for the single-file clause to
+ * mean anything. `06` §8.5's own number is 3 abreast, so below three present
+ * the formation it asserts is not available to the pack at all. */
+const ENGAGED_MASS = 3;
 
 // ===========================================================================
 // Layer 1 — pure ring-slot/lane/formation math against the 06 §8.2 table.
@@ -511,6 +515,7 @@ async function measureCorridorTransit(ai, ctx, actors, physics, rankers, target,
   let minCentreDistancePair = null;
   let everSingleFiled = false;
   let singleFileSamples = 0;
+  let singleFileWithMass = 0;
   let firstSingleFile = null;
   const laneTrace = [];
   let samplesWithMultipleInCorridor = 0;
@@ -571,6 +576,12 @@ async function measureCorridorTransit(ai, ctx, actors, physics, rankers, target,
           everSingleFiled = true;
           singleFileSamples++;
           if (firstSingleFile === null) firstSingleFile = { step: ctx.time.step, countInCorridor: inCorridor.length };
+          // O-147: the ASSERTED clause counts single-filing only while the
+          // engaged mass is in the corridor. Below `ENGAGED_MASS`, "3 abreast"
+          // is not a formation the pack could hold even in principle — two
+          // members strung out at the transit's leading or trailing edge is
+          // geometry, not a failure of the crowd rules. Both numbers print.
+          if (inCorridor.length >= ENGAGED_MASS) singleFileWithMass++;
         }
 
         const lanesOccupied = new Set(inCorridor.map((r) => ai._crowdStore.lane[r.poolIndex]));
@@ -589,7 +600,7 @@ async function measureCorridorTransit(ai, ctx, actors, physics, rankers, target,
 
   return {
     SELF_DIAMETER, X_BAND, maxAbreast, maxOccupiedLanes, minCentreDistance, minCentreDistancePair,
-    everSingleFiled, singleFileSamples, firstSingleFile, laneTrace, samplesWithMultipleInCorridor, samplesWithMultipleLanes,
+    everSingleFiled, singleFileSamples, singleFileWithMass, firstSingleFile, laneTrace, samplesWithMultipleInCorridor, samplesWithMultipleLanes,
     arrivedCount, arrivalStepOf, doorwayQueueEventsObserved, rotationsObserved,
   };
 }
@@ -604,7 +615,7 @@ function printCorridorMetrics(label, m) {
   // eslint-disable-next-line no-console
   console.log(`samples with >=2 in corridor: ${m.samplesWithMultipleInCorridor}; of those, >1 lane occupied: ${m.samplesWithMultipleLanes}`);
   // eslint-disable-next-line no-console
-  console.log(`maximum abreast, ONE-BODY-DEPTH window (X_BAND=${m.X_BAND}m, diameter=${m.SELF_DIAMETER}m) observed: ${m.maxAbreast}; ever dropped to single-file while >=2 present: ${m.everSingleFiled} (${m.singleFileSamples}/${m.samplesWithMultipleInCorridor} samples, first at ${JSON.stringify(m.firstSingleFile)})`);
+  console.log(`maximum abreast, ONE-BODY-DEPTH window (X_BAND=${m.X_BAND}m, diameter=${m.SELF_DIAMETER}m) observed: ${m.maxAbreast}; ever dropped to single-file while >=2 present: ${m.everSingleFiled} (${m.singleFileSamples}/${m.samplesWithMultipleInCorridor} samples, WITH ENGAGED MASS (>=3): ${m.singleFileWithMass}, first at ${JSON.stringify(m.firstSingleFile)})`);
   // eslint-disable-next-line no-console
   console.log(`maximum distinct lanes occupied at once: ${m.maxOccupiedLanes}`);
   // eslint-disable-next-line no-console
