@@ -897,23 +897,32 @@ function evaluateLayout(world, nav, plan, worldSeed, runIndex) {
     const r = nav.regionAt(p.x, p.z);
     if (r < 0 || r !== entryRegion) {
       // I1 is written against a POINT (`regionAt(exit)`), but an exit trigger
-      // is a rect (`{x, z, width, depth}`). The centre of a 5 x 2 m rect
-      // routinely lands exactly on a 0.5 m nav-cell boundary, so the literal
-      // point test can read -1 while the trigger rect itself sits on walkable
-      // ground. The point test is what is ASSERTED (it is what I1 says);
-      // `rectTouchesEntry` is measured beside it so a reader can tell a
-      // genuinely sealed exit from a boundary artefact. Both are printed.
+      // is a rect. The point test is what is ASSERTED (it is what I1 says);
+      // the rect is measured beside it, as a cell map, so a reader can tell a
+      // genuinely sealed exit from a boundary artefact WITHOUT having to
+      // trust either word. That map is why the "boundary artefact" reading
+      // this comment used to assert was withdrawn — see O-138: the failures
+      // are a blocked column down the rect's centre, identical on every
+      // failing layout, not a quantisation tie.
       let rectTouchesEntry = false;
+      let cells = 0, cellsInEntry = 0, cellsWalkable = 0;
+      const rows = [];
       if (p.rect) {
         const hw = p.rect.width / 2, hd = p.rect.depth / 2;
-        for (let dx = -hw; dx <= hw && !rectTouchesEntry; dx += grid.cellSize) {
-          for (let dz = -hd; dz <= hd && !rectTouchesEntry; dz += grid.cellSize) {
-            if (nav.regionAt(p.x + dx, p.z + dz) === entryRegion) rectTouchesEntry = true;
+        for (let dz = -hd; dz <= hd; dz += grid.cellSize) {
+          let row = '';
+          for (let dx = -hw; dx <= hw; dx += grid.cellSize) {
+            cells++;
+            const inEntry = nav.regionAt(p.x + dx, p.z + dz) === entryRegion;
+            if (nav.walkable(p.x + dx, p.z + dz)) cellsWalkable++;
+            if (inEntry) { cellsInEntry++; rectTouchesEntry = true; }
+            row += inEntry ? '.' : '#';
           }
+          rows.push(row);
         }
       }
       if (rectTouchesEntry) out.i1.rectRescued++;
-      out.i1.bad.push({ kind: p.kind, tag: p.tag, x: p.x, z: p.z, region: r, rectTouchesEntry });
+      out.i1.bad.push({ kind: p.kind, tag: p.tag, x: p.x, z: p.z, region: r, rectTouchesEntry, cells, cellsInEntry, cellsWalkable, centreWalkable: nav.walkable(p.x, p.z), map: rows.join('|') });
     }
   }
 
@@ -1100,9 +1109,9 @@ function buildZoneChecks(zoneId, results, checks) {
     `entry->exit walkable ${n - i1Bad.length}/${n}`,
     [
       ...(i1Rescued > 0 ? [
-        `${i1Rescued} of the failing points are EXIT TRIGGERS whose rect does touch the entry region — I1 tests the rect's CENTRE (regionAt(exit)) and a 5 x 2 m rect's centre routinely lands exactly on a 0.5 m nav-cell boundary. Genuinely disconnected layouts: ${i1Sealed.length}/${n}.`,
+        `${i1Rescued} of the failing points are EXIT TRIGGERS whose rect does touch the entry region, but NOT because the centre grazes a cell boundary (O-138 withdrew that reading). The cell map below is identical on every failing layout: a one-cell blocked column down the rect's centre at x = stairRoom.centre.x, plus the whole row at z = ramp.footZ, which is the stair room's own north WALL (gen/bonereach.js#buildStairRamp returns footZ = stairRoom.z1). Genuinely disconnected layouts: ${i1Sealed.length}/${n}.`,
       ] : []),
-      ...listing(i1Bad, (r) => `${label(r)}  ${r.i1.bad.map((b) => `${b.kind}:${b.tag}@(${b.x.toFixed(2)},${b.z.toFixed(2)}) region=${b.region}${b.rectTouchesEntry ? ' [rect touches entry region]' : ''}`).join('  ')}  entryRegion=${r.entryRegion}`),
+      ...listing(i1Bad, (r) => `${label(r)}  ${r.i1.bad.map((b) => `${b.kind}:${b.tag}@(${b.x.toFixed(2)},${b.z.toFixed(2)}) region=${b.region}${b.cells ? ` rectCells inEntry/walkable/total=${b.cellsInEntry}/${b.cellsWalkable}/${b.cells} centreWalkable=${b.centreWalkable} map=[${b.map}]` : ''}${b.rectTouchesEntry ? ' [rect touches entry region]' : ''}`).join('  ')}  entryRegion=${r.entryRegion}`),
     ]));
 
   // --- I2 ------------------------------------------------------------------
