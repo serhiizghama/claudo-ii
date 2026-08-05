@@ -927,22 +927,19 @@ function evaluateLayout(world, nav, plan, worldSeed, runIndex) {
   }
 
   // --- I2 — every chest is reachable ---------------------------------------
-  // `ZoneInstance.chests[i]` carries `unsnappedPosition` and nothing else
-  // positional: `07` §3.2 R10 explicitly returns chests UNSNAPPED for "a
-  // later stage — the one that already has a live NavGrid — to snap", and no
-  // stage ever does. Both readings are measured: the literal shipped position
-  // (which is what any consumer would read today) and the position after
-  // `nav.snap(p, 2.0)` (what R10 asked for). The literal one is the assertion.
-  out.i2 = { total: zone.chests.length, bad: [], badSnapped: 0 };
+  // The assertion is the SHIPPED position — `chests[i].x/.z`, what any
+  // consumer reads. That used to be the generator's raw `unsnappedPosition`,
+  // because `07` §3.2 R10's snap had no stage to run in; `world` runs it at
+  // T10 now (O-140), so the shipped position is the snapped one. The raw
+  // point is measured beside it so the snap's effect stays visible and a
+  // regression that quietly stops snapping is not invisible.
+  out.i2 = { total: zone.chests.length, bad: [], badRaw: 0 };
   for (let i = 0; i < zone.chests.length; i++) {
     const c = zone.chests[i];
-    const p = c.unsnappedPosition || c.position || c;
-    const r = nav.regionAt(p.x, p.z);
-    if (r !== entryRegion) {
-      out.i2.bad.push({ index: i, x: p.x, z: p.z, region: r });
-      const s = nav.snap(p.x, p.z, 2.0);
-      if (!s || nav.regionAt(s.x, s.z) !== entryRegion) out.i2.badSnapped++;
-    }
+    const r = nav.regionAt(c.x, c.z);
+    const raw = c.unsnappedPosition;
+    if (raw && nav.regionAt(raw.x, raw.z) !== entryRegion) out.i2.badRaw++;
+    if (r !== entryRegion) out.i2.bad.push({ index: i, x: c.x, z: c.z, region: r, rawX: raw ? raw.x : c.x, rawZ: raw ? raw.z : c.z });
   }
 
   // --- I3 — every pack and spawn point is reachable and outside geometry ----
@@ -1118,14 +1115,12 @@ function buildZoneChecks(zoneId, results, checks) {
   const i2Bad = results.filter((r) => r.i2.bad.length > 0);
   const i2BadChests = results.reduce((a, r) => a + r.i2.bad.length, 0);
   const i2Chests = results.reduce((a, r) => a + r.i2.total, 0);
-  const i2StillBadSnapped = results.reduce((a, r) => a + r.i2.badSnapped, 0);
+  const i2BadRaw = results.reduce((a, r) => a + r.i2.badRaw, 0);
   checks.push(makeCheck('I2', 'fail', zoneId, i2Bad.length === 0 ? 'pass' : 'fail',
     `chests reachable ${n - i2Bad.length}/${n} layouts (${i2Chests - i2BadChests}/${i2Chests} chests)`,
-    i2Bad.length === 0 ? [] : [
-      `${i2BadChests} of ${i2Chests} chests are not in the entry region at their SHIPPED position`,
-      `of those, ${i2StillBadSnapped} are still unreachable after nav.snap(p, 2.0) — the remaining ${i2BadChests - i2StillBadSnapped} would pass if anyone snapped them`,
-      '07 §3.2 R10 returns chests UNSNAPPED for "a later stage... to snap"; no stage does (see this ticket\'s report)',
-      ...listing(i2Bad, (r) => `${label(r)}  ${r.i2.bad.map((b) => `chest[${b.index}]@(${b.x.toFixed(2)},${b.z.toFixed(2)}) region=${b.region}`).join('  ')}  entryRegion=${r.entryRegion}`),
+    [
+      `${i2BadRaw} of ${i2Chests} chests were outside the entry region at R10's RAW draw; ${i2BadChests} still are after world's T10 snap (O-140), so the snap rescued ${i2BadRaw - i2BadChests}`,
+      ...(i2Bad.length === 0 ? [] : listing(i2Bad, (r) => `${label(r)}  ${r.i2.bad.map((b) => `chest[${b.index}]@(${b.x.toFixed(2)},${b.z.toFixed(2)}) region=${b.region} raw=(${b.rawX.toFixed(2)},${b.rawZ.toFixed(2)})`).join('  ')}  entryRegion=${r.entryRegion}`)),
     ]));
 
   // --- I3 ------------------------------------------------------------------

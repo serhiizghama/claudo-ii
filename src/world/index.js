@@ -426,6 +426,37 @@ function freezeFootprints(footprints) {
   return Object.freeze(footprints);
 }
 
+/** ASSIGNED. `07` §3.2 R10 writes `nav.snap(...)` with no radius, and
+ * `nav.snap` requires one. 2.0 m is this tree's standing figure for putting
+ * a placed object back on walkable ground — `spawn.js`'s `MEMBER_SNAP_RADIUS`
+ * carries it as `07` §8.3 step 7's own literal, and `motion.js`'s
+ * `TELEPORT_SNAP_RADIUS` assigns the same. Owner ruling is open (O-140). */
+export const CHEST_SNAP_RADIUS = 2.0;
+
+/**
+ * R10's snap, run where a live `NavGrid` exists. `unsnappedPosition` is left
+ * untouched — it is the generator's own record and `spawn.js` reads it for
+ * deny points — so a caller can always still see where R10 originally drew.
+ * A chest whose snap finds nothing inside the radius keeps its unsnapped
+ * `x`/`z` and is counted rather than moved somewhere invented.
+ * @param {object|undefined} nav @param {object[]} chests
+ * @returns {{total:number, snapped:number, moved:number, unresolved:number}}
+ */
+function snapChests(nav, chests) {
+  const report = { total: chests.length, snapped: 0, moved: 0, unresolved: 0 };
+  if (!nav || typeof nav.snap !== 'function' || !nav.grid) return report;
+  for (const c of chests) {
+    const from = c.unsnappedPosition || { x: c.x, z: c.z };
+    const s = nav.snap(from.x, from.z, CHEST_SNAP_RADIUS);
+    if (!s) { report.unresolved++; continue; }
+    report.snapped++;
+    if (s.x !== c.x || s.z !== c.z) report.moved++;
+    c.x = s.x;
+    c.z = s.z;
+  }
+  return report;
+}
+
 export class WorldSystem {
   static id = 'world';
   static deps = ['materials', 'physics']; // O-61 (WRLD-4) — see the file header
@@ -535,6 +566,10 @@ export class WorldSystem {
      * spawn pass — rule 11). Report/test-only, not a gameplay-facing field;
      * `spawnPoints`/`packs` below are the contracted surface (O-71). */
     this._spawnReport = null;
+
+    /** R10's chest snap, run at T10 (`snapChests`). Report/test-only, the
+     * same shape and status as `_spawnReport` above. */
+    this._chestSnapReport = null;
 
     /** WRLD-8 — the current zone's Altar layout/dressing (`null` for every
      * other zone kind). Report/test-only, same discipline as
@@ -1170,6 +1205,17 @@ export class WorldSystem {
 
     const nav = typeof this._ctx.peek === 'function' ? this._ctx.peek('nav') : undefined;
     if (nav && typeof nav.rebuild === 'function') nav.rebuild(instance);
+
+    // R10's own missing half (`07` §3.2): "each chest: position =
+    // nav.snap(cellCentre + S4.disc(6.0))". The pure generators cannot do it
+    // — no live grid at layout time, and rule 2 bars them from importing
+    // `src/nav/` — so both of them return `unsnappedPosition` and say in
+    // their headers that a later stage must snap. No stage ever did, and
+    // `normalizeChests` filled `x`/`z` straight from the unsnapped point, so
+    // the shipped position was the pre-snap one and 559 of 1833 Wastes chests
+    // sat outside the entry region (O-140). This is that stage: after
+    // `nav.rebuild`, before R11.
+    this._chestSnapReport = snapChests(nav, instance.chests);
 
     // WRLD-9 (T10 — Spawning, R11 / `07` §8): runs strictly after
     // `nav.rebuild(instance)` above — `spawn.js` reads `nav.grid`'s real,
