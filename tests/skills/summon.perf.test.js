@@ -218,10 +218,13 @@ test('SKIL-11 perf — summonOf / unity hasBuff / buffRemaining / buffList are A
   // near zero (7.61 B/call at N=1e6 "became" 0.27 at N=8e6). It is a proper
   // warm-up plus a same-round baseline that made it stand still and be seen.
   //
-  // It is pinned rather than tuned away: when someone changes the return to
-  // an integer (steps rather than seconds) or to an out-param, this assertion
-  // fires and forces the journal row. The value only boxes when the remaining
-  // time is non-integral, which this fixture guarantees (a 1e6-step buff).
+  // Owner ruling (O-137, 2026-08-05): `02` §"Reading the tables" now carves
+  // out exactly this — `Alloc: no` means "<= one boxed return value, nothing
+  // else". The row stays `no`; this pin is what makes the carve-out a bound
+  // rather than an amnesty. It is pinned rather than thresholded so that
+  // moving the return to integer steps or an out-param ALSO fires, and forces
+  // the journal row. The value only boxes when the remaining time is
+  // non-integral, which this fixture guarantees (a 1e6-step buff).
   const PINNED_BOXING_BYTES = 16;
   const byName = Object.fromEntries(readings.map((r) => [r.name, r]));
   const boxed = readings.find((r) => r.name.startsWith('skills.buffRemaining'));
@@ -235,7 +238,7 @@ test('SKIL-11 perf — summonOf / unity hasBuff / buffRemaining / buffList are A
     `buffRemaining's boxed-double cost is pinned at ${PINNED_BOXING_BYTES} B/call and measured ${boxed.net.toFixed(4)}. ` +
     'If it dropped, someone fixed the contract gap — delete this pin and write the journal row. ' +
     'If it grew, something ELSE started allocating on this path.');
-  console.log(`[SKIL-11 perf] PINNED contract gap: buffRemaining allocates ${boxed.net.toFixed(4)} B/call against 02 §10's \`Alloc: no\` — one boxed HeapNumber per call, owner ruling needed (see PROGRESS.md)`);
+  console.log(`[SKIL-11 perf] PINNED: buffRemaining allocates ${boxed.net.toFixed(4)} B/call — one boxed HeapNumber, inside 02's boxed-return carve-out on \`Alloc: no\` (O-137 ruling)`);
   void byName;
   void sink;
 });

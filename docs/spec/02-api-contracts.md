@@ -21,7 +21,20 @@ style of `src/ui/index.js`, an API table, an event table, and a forbidden list.
 | Column | Meaning |
 |---|---|
 | **Fixed** | `Y` — safe to call from `fixedUpdate`. `N` — must not be: it touches DOM, GPU state, `performance.now()`, or allocates unboundedly. `—` — `init()`/`dispose()` only. |
-| **Alloc** | `no` — allocates nothing. `pool` — draws from a preallocated pool and must be released. `yes` — allocates; legal only in `init()`, on zone load, or on a user action behind a fade. |
+| **Alloc** | `no` — the method body allocates nothing (see the boxed-return carve-out below). `pool` — draws from a preallocated pool and must be released. `yes` — allocates; legal only in `init()`, on zone load, or on a user action behind a fade. |
+
+**The boxed-return carve-out on `Alloc: no`.** A method that returns a
+fractional `number` may still cost one 16-byte `HeapNumber` per call: V8 boxes
+a non-integral double returned across a call boundary it did not inline. That
+box is the *caller's* return slot, not work the body did, and it is a nursery
+allocation that nothing retains. So `Alloc: no` means **≤ one boxed return
+value, and nothing else** — a second byte above that is a contract breach.
+Measured on `buffRemaining` at a flat 16.0000 B/call (O-136/O-137); the same
+carve-out covers every `Alloc: no` row returning seconds or metres
+(`cooldownRemaining`, `absorbRemaining`, `rangeOf`, `radiusOf`). It is a
+carve-out, not an amnesty: `tests/skills/summon.perf.test.js` pins the figure
+at exactly 16, so shrinking it (integer steps, an `out` param) or growing it
+both fail the gate and force a journal row.
 
 Types are written in JSDoc shorthand. `Vec3` means a plain
 `{ x, y, z }` object of numbers, never a `THREE.Vector3`, at any boundary

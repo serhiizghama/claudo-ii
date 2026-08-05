@@ -248,11 +248,28 @@ Run with `node --expose-gc`. The gate:
 
 | id | Assertion | Threshold |
 |---|---|---|
-| `12.A01` | Every `Alloc = no` method allocates | `< 1 byte/call` averaged over 10 000 calls |
+| `12.A01` | Every `Alloc = no` method allocates | `< 1 byte/call` net, or exactly one 16-byte boxed return — see below |
 | `12.A02` | A full `fixedUpdate` step with 25 monsters in contact allocates | `< 1 byte/step` after warm-up |
 | `12.A03` | `EventBus.emit` with 8 handlers allocates | `0 bytes` — this is `ARCHITECTURE.md`'s C-4 |
 | `12.A04` | A pooled record is never returned twice without a release | pool double-release assert, dev builds |
 | `12.A05` | `combat.resolve` over a 12-target `flame_wave` allocates | `< 1 byte/call` |
+
+Two things about `12.A01`'s threshold, both learned the hard way (O-135…O-137).
+
+**Measure net.** `allocatedBytes` divides a whole round's heap delta by `N`, so
+a cost paid once per round is reported per-call at `F / N` — and raising `N`
+dilutes it until it disappears. Use `allocatedBytesNet` /
+`assertAllocationFreeNet` (`tests/helpers/alloc.js`): same measurement minus a
+no-op baseline taken in the same round, after a real warm-up (a single call
+does not tier the function up, and an un-tiered reading is bimodal). The
+`< 1 byte` figure is unchanged; it now applies to the quantity this line always
+meant.
+
+**One boxed return is exempt, nothing more.** Per `02-api-contracts.md`'s
+boxed-return carve-out, a method returning a fractional `number` may cost one
+16-byte `HeapNumber` at the call boundary. Such a method is asserted at exactly
+16 B/call rather than under 1 — pinned, not thresholded, so that both fixing it
+and regressing it fail loudly.
 
 `12.A02` is the one that matters. It is also the one that will fail most often,
 because a per-frame allocation is easy to add and invisible until a hitch shows
